@@ -14,21 +14,44 @@ const int IR_RECV_PIN = 2;    // 赤外線受信モジュール
 
 // 定義値
 const unsigned long DEBOUNCE_DELAY = 50;
-const unsigned long IR_COOLDOWN = 500;
+const unsigned long IR_COOLDOWN = 1000;  // チャタリング対策：1秒に変更
 
 // 独自IRパターン定義（NEC形式を採用）
+// NEC形式の正しい実装（32ビット完全版）
+// ビット0 = 560,560  ビット1 = 560,1680
+
 const uint16_t ON_PATTERN[] PROGMEM = {
   9000, 4500,  // NECリーダー
-  560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560,  // アドレス(0x00)
-  560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560,  // コマンド(0x01)
+  // アドレス 0x00 (0000 0000)
+  560,560, 560,560, 560,560, 560,560,
+  560,560, 560,560, 560,560, 560,560,
+  // アドレス反転 0xFF (1111 1111)
+  560,1680, 560,1680, 560,1680, 560,1680,
+  560,1680, 560,1680, 560,1680, 560,1680,
+  // コマンド 0x01 (LSBファースト: 1,0,0,0,0,0,0,0)
+  560,1680, 560,560, 560,560, 560,560,
+  560,560, 560,560, 560,560, 560,560,
+  // コマンド反転 0xFE (LSBファースト: 0,1,1,1,1,1,1,1)
+  560,560, 560,1680, 560,1680, 560,1680,
+  560,1680, 560,1680, 560,1680, 560,1680,
   560  // ストップビット
 };
 const int ON_PATTERN_LEN = sizeof(ON_PATTERN) / sizeof(ON_PATTERN[0]);
 
 const uint16_t OFF_PATTERN[] PROGMEM = {
   9000, 4500,  // NECリーダー
-  560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560,  // アドレス(0x00)
-  560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560, 560,  // コマンド(0x02)
+  // アドレス 0x00 (0000 0000)
+  560,560, 560,560, 560,560, 560,560,
+  560,560, 560,560, 560,560, 560,560,
+  // アドレス反転 0xFF (1111 1111)
+  560,1680, 560,1680, 560,1680, 560,1680,
+  560,1680, 560,1680, 560,1680, 560,1680,
+  // コマンド 0x02 (LSBファースト: 0,1,0,0,0,0,0,0)
+  560,560, 560,1680, 560,560, 560,560,
+  560,560, 560,560, 560,560, 560,560,
+  // コマンド反転 0xFD (LSBファースト: 1,0,1,1,1,1,1,1)
+  560,1680, 560,560, 560,1680, 560,1680,
+  560,1680, 560,1680, 560,1680, 560,1680,
   560  // ストップビット
 };
 const int OFF_PATTERN_LEN = sizeof(OFF_PATTERN) / sizeof(OFF_PATTERN[0]);
@@ -72,7 +95,7 @@ struct TaskContext {
 Servo myServo;
 int currentAngle = 0;
 int logicalState = -1;
-uint16_t sendBuf[24];
+uint16_t sendBuf[70];  // NEC完全形式用バッファ（67要素必要）
 
 TaskContext currentTask = {-1, 0, 0};
 
@@ -88,16 +111,34 @@ unsigned long lastIRReceiveTime = 0;
 
 // 赤外線信号送信（3.9.0対応）
 void sendIRSignal(int state) {
+  Serial.print("IR sending:");
+  Serial.print(state == 1 ? "ON" : "OFF");
+  Serial.print(" len:");
+
   if (state == 1) {
     for (int i = 0; i < ON_PATTERN_LEN; i++) {
       sendBuf[i] = pgm_read_word(&ON_PATTERN[i]);
     }
+    Serial.print(ON_PATTERN_LEN);
+    Serial.print(" [");
+    for (int i = 0; i < ON_PATTERN_LEN && i < 67; i++) {
+      Serial.print(sendBuf[i]);
+      if (i < ON_PATTERN_LEN - 1 && i < 66) Serial.print(",");
+    }
+    Serial.println("]");
     IrSender.sendRaw(sendBuf, ON_PATTERN_LEN, 38);
     Serial.println("IR sent:ON");
   } else if (state == 0) {
     for (int i = 0; i < OFF_PATTERN_LEN; i++) {
       sendBuf[i] = pgm_read_word(&OFF_PATTERN[i]);
     }
+    Serial.print(OFF_PATTERN_LEN);
+    Serial.print(" [");
+    for (int i = 0; i < OFF_PATTERN_LEN && i < 67; i++) {
+      Serial.print(sendBuf[i]);
+      if (i < OFF_PATTERN_LEN - 1 && i < 66) Serial.print(",");
+    }
+    Serial.println("]");
     IrSender.sendRaw(sendBuf, OFF_PATTERN_LEN, 38);
     Serial.println("IR sent:OFF");
   }
@@ -124,30 +165,7 @@ int selectScenarioFromSwitch(int currentSwitchState, int lastDebouncedState) {
   return -1;
 }
 
-// 赤外線受信パターンの判定（簡易版：パルス数で判定）
-int checkIRPattern(const uint16_t* pattern, int patternLen) {
-  if (IrReceiver.decodedIRData.rawDataPtr == nullptr)
-    return 0;
-
-  int dataLen = IrReceiver.decodedIRData.rawDataPtr->rawlen;
-
-  // パルス数だけで判定
-  // ON: 20個以上
-  // OFF: 10個以上19個以下
-  if (dataLen >= 20) {
-    Serial.print("-> Detected ON (len:");
-    Serial.print(dataLen);
-    Serial.println(")");
-    return 1;  // ONと判定
-  } else if (dataLen >= 10 && dataLen < 20) {
-    Serial.print("-> Detected OFF (len:");
-    Serial.print(dataLen);
-    Serial.println(")");
-    return 0;  // OFFと判定
-  }
-
-  return -1;  // 不明
-}
+// checkIRPattern()関数は削除 - NECデコーダーを使用するため不要
 
 void moveServoTo(int angle) {
   if (currentAngle != angle) {
@@ -170,7 +188,7 @@ void activateScenario(int scenarioId) {
   sendIRSignal(logicalState);
 }
 
-// 赤外線受信処理（3.9.0対応）
+// 赤外線受信処理（NECデコーダー使用）
 void handleIRReception() {
   if (millis() - lastIRReceiveTime < IR_COOLDOWN)
     return;
@@ -178,30 +196,51 @@ void handleIRReception() {
   if (IrReceiver.decode()) {
     lastIRReceiveTime = millis();
 
-    if (IrReceiver.decodedIRData.rawDataPtr != nullptr) {
-      int dataLen = IrReceiver.decodedIRData.rawDataPtr->rawlen;
+    // NECプロトコルとして解析できた場合
+    if (IrReceiver.decodedIRData.protocol == NEC) {
+      uint8_t address = IrReceiver.decodedIRData.address;
+      uint8_t command = IrReceiver.decodedIRData.command;
 
-      Serial.print("IR rx len:");
-      Serial.print(dataLen);
+      Serial.print("IR rx NEC addr:0x");
+      Serial.print(address, HEX);
+      Serial.print(" cmd:0x");
+      Serial.println(command, HEX);
 
-      // 簡易判定：パルス数で判定
-      if (dataLen >= 20) {
-        Serial.print(" -> ON (current logicalState:");
-        Serial.print(logicalState);
-        // シナリオ実行中でも受け付ける
-        activateScenario(1);
-        IrReceiver.resume();
-        return;
-      } else if (dataLen >= 10 && dataLen < 20) {
-        Serial.print(" -> OFF (current logicalState:");
-        Serial.print(logicalState);
-        // シナリオ実行中でも受け付ける
-        activateScenario(0);
-        IrReceiver.resume();
-        return;
+      // address=0x00 でコマンドを判定
+      // 0x01 またはその反転 0x80 → ON
+      // 0x02 またはその反転 0xFD → OFF
+      if (address == 0x00) {
+        if (command == 0x01 || command == 0x80) {  // ONコマンド
+          // 現在ON状態なら無視（チャタリング対策）
+          if (logicalState == 1) {
+            Serial.println("-> ON (ignored, already ON)");
+          } else {
+            Serial.println("-> ON");
+            activateScenario(1);
+          }
+        } else if (command == 0x02 || command == 0xFD) {  // OFFコマンド
+          // 現在OFF状態なら無視（チャタリング対策）
+          if (logicalState == 0) {
+            Serial.println("-> OFF (ignored, already OFF)");
+          } else {
+            Serial.println("-> OFF");
+            activateScenario(0);
+          }
+        } else {
+          Serial.print("-> UNKNOWN cmd:0x");
+          Serial.println(command, HEX);
+        }
+      } else {
+        Serial.print("-> UNKNOWN addr:0x");
+        Serial.println(address, HEX);
       }
 
-      Serial.println(" -> UNKNOWN");
+    } else {
+      // NEC以外のプロトコルまたは解析失敗
+      Serial.print("IR rx protocol:");
+      Serial.print(IrReceiver.decodedIRData.protocol);
+      Serial.print(" len:");
+      Serial.println(IrReceiver.decodedIRData.rawDataPtr ? IrReceiver.decodedIRData.rawDataPtr->rawlen : 0);
     }
 
     IrReceiver.resume();
@@ -240,7 +279,7 @@ void executeTask() {
 
 void setup() {
   Serial.begin(9600);
-  while (!Serial);
+  //while (!Serial);
 
   pinMode(SWITCH_PIN, INPUT_PULLUP);
   myServo.attach(SERVO_PIN);
