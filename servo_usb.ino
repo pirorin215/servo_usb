@@ -9,29 +9,58 @@ const int SERVO_PIN = 5;
 const int SWITCH_PIN = 4;
 
 // 定義値
-const int ANGLE_ON = 130;                      // スイッチ開放時の角度（ON状態）
-const int ANGLE_OFF = 167;                     // スイッチGND接触時の角度（OFF状態）
-const int WAYPOINT_ANGLE_ON_TO_OFF = 180;      // ON→OFF時の経由地角度
-const int WAYPOINT_ANGLE_OFF_TO_ON = 120;      // OFF→ON時の経由地角度
-const int WAYPOINT_DELAY = 800;                // 経由地での遅延(ms)
-const int STEP_DELAY = 0;                      // 1ステップの遅延(ms)
 const unsigned long DEBOUNCE_DELAY = 50;       // デバウンス遅延(ms)
 
-// 移動状態
-enum MoveState {
-  IDLE = 0,              // 移動なし
-  MOVING_TO_WAYPOINT = 1,  // 経由地へ移動中
-  WAITING_AT_WAYPOINT = 2, // 経由地で遅延中
-  MOVING_TO_TARGET = 3     // 目標地へ移動中
+// シナリオ列挙型
+enum Scenario {
+  SCENARIO_NONE = 0,
+  SCENARIO_TURN_OFF = 1,     // OFFにする
+  SCENARIO_TURN_ON = 2       // ONにする
+};
+
+// タスクフェーズ
+enum TaskPhase {
+  PHASE_IDLE = 0,
+  PHASE_MOVE_TO_WAYPOINT = 1,
+  PHASE_WAIT_AT_WAYPOINT = 2,
+  PHASE_MOVE_TO_TARGET = 3
+};
+
+// シナリオ設定構造体
+struct ScenarioConfig {
+  int targetAngle;           // 目標角度
+  int waypoint;              // 経由地角度
+  unsigned long waypointDelay;  // 経由地での遅延(ms)
+  const char* name;          // シナリオ名
+};
+
+// シナリオ定義配列
+// フォーマット: {targetAngle, waypoint, waypointDelay, name}
+const ScenarioConfig SCENARIO_CONFIGS[] = {
+  {167, 180, 800, "OFFにする"},     // 目標、経由地、待機
+  {130, 120, 800, "ONにする"}       // 目標、経由地、待機
+};
+
+// タスク実行コンテキスト
+struct TaskContext {
+  Scenario scenario;
+  TaskPhase phase;
+  unsigned long phaseStartTime;
+  int targetAngle;
+  int waypointAngle;
 };
 
 // グローバル変数
 Servo myServo;
 int currentAngle = 0;             // 初期位置（setupで設定）
-MoveState moveState = IDLE;
-int lastTargetAngle = -1;
-int currentWaypoint = 0;          // 現在の経由地
-unsigned long delayStartTime = 0;
+
+TaskContext currentTask = {
+  SCENARIO_NONE,
+  PHASE_IDLE,
+  0,
+  0,
+  0
+};
 
 // デバウンス用グローバル変数
 unsigned long lastDebounceTime = 0;
@@ -51,6 +80,82 @@ void log(const char* format, ...) {
   Serial.println(buf);
 }
 
+// ========== ヘルパー関数 ==========
+
+// シナリオ設定取得
+ScenarioConfig getScenarioConfig(Scenario scenario) {
+  if (scenario == SCENARIO_TURN_OFF)
+    return SCENARIO_CONFIGS[0];
+  if (scenario == SCENARIO_TURN_ON)
+    return SCENARIO_CONFIGS[1];
+  return {0, 0, 0, "NONE"};
+}
+
+// シナリオ選択
+Scenario selectScenario(int currentSwitchState, int lastDebouncedState) {
+  if (lastDebouncedState == HIGH && currentSwitchState == LOW)
+    return SCENARIO_TURN_OFF;   // HIGH → LOW でOFFにする
+  else if (lastDebouncedState == LOW && currentSwitchState == HIGH)
+    return SCENARIO_TURN_ON;    // LOW → HIGH でONにする
+  return SCENARIO_NONE;
+}
+
+// 直接サーボ移動
+void moveServoTo(int angle) {
+  if (currentAngle != angle) {
+    myServo.write(angle);
+    currentAngle = angle;
+    log("Servo moved to: %d", currentAngle);
+  }
+}
+
+// シナリオ起動
+void activateScenario(Scenario scenario) {
+  currentTask.scenario = scenario;
+  currentTask.phase = PHASE_MOVE_TO_WAYPOINT;
+  currentTask.phaseStartTime = millis();
+
+  ScenarioConfig config = getScenarioConfig(scenario);
+  currentTask.targetAngle = config.targetAngle;
+  currentTask.waypointAngle = config.waypoint;
+
+  log("Scenario: %s (waypoint: %d→target: %d, delay: %lums)",
+      config.name, config.waypoint, config.targetAngle, config.waypointDelay);
+}
+
+// タスク実行エンジン
+void executeTask() {
+  switch (currentTask.phase) {
+    case PHASE_IDLE:
+      break;
+
+    case PHASE_MOVE_TO_WAYPOINT:
+      moveServoTo(currentTask.waypointAngle);
+      log("Waypoint reached: %d", currentTask.waypointAngle);
+      currentTask.phase = PHASE_WAIT_AT_WAYPOINT;
+      currentTask.phaseStartTime = millis();
+      break;
+
+    case PHASE_WAIT_AT_WAYPOINT:
+      {
+        ScenarioConfig config = getScenarioConfig(currentTask.scenario);
+        if (millis() - currentTask.phaseStartTime >= config.waypointDelay) {
+          log("Waypoint wait complete");
+          currentTask.phase = PHASE_MOVE_TO_TARGET;
+        }
+      }
+      break;
+
+    case PHASE_MOVE_TO_TARGET:
+      moveServoTo(currentTask.targetAngle);
+      log("Target reached: %d", currentTask.targetAngle);
+      currentTask.phase = PHASE_IDLE;
+      currentTask.scenario = SCENARIO_NONE;
+      break;
+  }
+}
+
+
 void setup() {
   Serial.begin(9600);
   //while (!Serial);  // シリアルモニタを待つ
@@ -58,12 +163,14 @@ void setup() {
   // スイッチの設定（プルアップ抵抗方式）
   pinMode(SWITCH_PIN, INPUT_PULLUP);
 
-  // 初期スイッチ状態を読み取り
+  // 初期スイッチ状態を読み取り、初期位置を設定
   int switchState = digitalRead(SWITCH_PIN);
-  lastTargetAngle = (switchState == HIGH) ? ANGLE_ON : ANGLE_OFF;
-  currentAngle = lastTargetAngle;  // 初期位置をスイッチ状態に合わせる
+  ScenarioConfig initialConfig = (switchState == HIGH) ?
+    SCENARIO_CONFIGS[1] :  // ONにする
+    SCENARIO_CONFIGS[0];   // OFFにする
+  currentAngle = initialConfig.targetAngle;
 
-  // デバウンス状態の初期化（setupで行う！）
+  // デバウンス状態の初期化
   lastDebouncedState = switchState;
   lastRawSwitchState = switchState;
 
@@ -73,121 +180,49 @@ void setup() {
 
   Serial.println("=== Startup ===");
   log("Initial currentAngle: %d", currentAngle);
-  log("Initial lastTargetAngle: %d", lastTargetAngle);
   log("Initial switchState: %s", switchState == HIGH ? "HIGH" : "LOW");
 }
 
 void loop() {
-  static MoveState lastState = IDLE;  // 前回の状態
+  static TaskPhase lastPhase = PHASE_IDLE;  // 前回のフェーズ
 
-  // スイッチ状態を読み取り
+  // 1. スイッチ読み取り
   int switchState = digitalRead(SWITCH_PIN);
 
-  // スイッチ開放時（HIGH）→ ON、GND接触時（LOW）→ OFF
-  int targetAngle = (switchState == HIGH) ? ANGLE_ON : ANGLE_OFF;
-
-  // デバッグ: スイッチ状態を表示（1秒おき）
+  // 2. デバッグログ
   static unsigned long lastPrint = 0;
   static int lastLoggedState = -1;
   if (millis() - lastPrint > 1000 || switchState != lastLoggedState) {
-    log("Switch: %d (%s) Target: %d CurrentAngle: %d", switchState, switchState == HIGH ? "HIGH" : "LOW", targetAngle, currentAngle);
+    log("Switch: %d (%s) CurrentAngle: %d", switchState, switchState == HIGH ? "HIGH" : "LOW", currentAngle);
     lastPrint = millis();
     lastLoggedState = switchState;
   }
 
-  // デバウンス処理
-  // 生のスイッチ状態が変わったらタイマーをリセット
+  // 3. デバウンス処理
   if (switchState != lastRawSwitchState) {
     lastDebounceTime = millis();
     lastRawSwitchState = switchState;
   }
 
-  // デバウンス期間を経過し、かつ安定状態が変わった場合のみ処理
-  // ※ IDLE状態の時のみスイッチ変化を受け付ける（重要！）
-  if (moveState == IDLE &&
+  // 4. シナリオ起動（IDLE時のみ）
+  if (currentTask.phase == PHASE_IDLE &&
       (millis() - lastDebounceTime) >= DEBOUNCE_DELAY &&
       switchState != lastDebouncedState) {
 
-    // 方向を判断して経由地を設定
-    if (lastDebouncedState == HIGH && switchState == LOW) {
-      // ON → OFF
-      currentWaypoint = WAYPOINT_ANGLE_ON_TO_OFF;
-      log("Direction: ON -> OFF");
-    } else if (lastDebouncedState == LOW && switchState == HIGH) {
-      // OFF → ON
-      currentWaypoint = WAYPOINT_ANGLE_OFF_TO_ON;
-      log("Direction: OFF -> ON");
-    } else {
-      // 不明な場合は現在位置を使用（経由地なし）
-      currentWaypoint = targetAngle;
-      log("Direction: Unknown (no waypoint)");
+    Scenario scenario = selectScenario(switchState, lastDebouncedState);
+    if (scenario != SCENARIO_NONE) {
+      activateScenario(scenario);
     }
-
-    log("Target: %d Waypoint: %d", targetAngle, currentWaypoint);
-
-    moveState = MOVING_TO_WAYPOINT;
-    lastTargetAngle = targetAngle;
-    lastDebouncedState = switchState;  // デバウンス後の状態を更新
+    lastDebouncedState = switchState;
   }
 
-  // 移動状態マシン
-  switch (moveState) {
-    case IDLE:
-      // 何もしない
-      break;
+  // 5. タスク実行
+  executeTask();
 
-    case MOVING_TO_WAYPOINT:
-      // 経由地へ移動
-      if (currentAngle != currentWaypoint) {
-        if (currentAngle < currentWaypoint) {
-          currentAngle++;
-        } else {
-          currentAngle--;
-        }
-        myServo.write(currentAngle);
-        delay(STEP_DELAY);
-      } else {
-        // 経由地に到達、遅延開始
-        log("Reached waypoint: %d", currentAngle);
-        moveState = WAITING_AT_WAYPOINT;
-        delayStartTime = millis();
-      }
-      break;
-
-    case WAITING_AT_WAYPOINT:
-      // 経由地で遅延
-      {
-        unsigned long elapsed = millis() - delayStartTime;
-        if (elapsed >= WAYPOINT_DELAY) {
-          // 遅延完了、目標地への移動開始
-          log("Wait complete (%lums)", elapsed);
-          log("Moving to target: %d", lastTargetAngle);
-          moveState = MOVING_TO_TARGET;
-        }
-      }
-      break;
-
-    case MOVING_TO_TARGET:
-      // 目標地へ移動
-      if (currentAngle != lastTargetAngle) {
-        if (currentAngle < lastTargetAngle) {
-          currentAngle++;
-        } else {
-          currentAngle--;
-        }
-        myServo.write(currentAngle);
-        delay(STEP_DELAY);
-      } else {
-        // 目標地に到達、完了
-        log("Reached target: %d", currentAngle);
-        moveState = IDLE;
-      }
-      break;
-  }
-
-  // 状態が変わったらログ出力（状態マシン実行後）
-  if (moveState != lastState) {
-    log("State: %d -> %d", lastState, moveState);
-    lastState = moveState;
+  // 6. フェーズ変更ログ
+  if (currentTask.phase != lastPhase) {
+    ScenarioConfig config = getScenarioConfig(currentTask.scenario);
+    log("Phase: %d -> %d [%s]", lastPhase, currentTask.phase, config.name);
+    lastPhase = currentTask.phase;
   }
 }
