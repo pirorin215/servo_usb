@@ -11,43 +11,51 @@ const int SWITCH_PIN = 4;
 // 定義値
 const unsigned long DEBOUNCE_DELAY = 50;       // デバウンス遅延(ms)
 
-// シナリオ列挙型
-enum Scenario {
-  SCENARIO_NONE = 0,
-  SCENARIO_TURN_OFF = 1,     // OFFにする
-  SCENARIO_TURN_ON = 2       // ONにする
+// コマンドタイプ
+enum CommandType {
+  CMD_MOVE = 0,    // 角度へ移動
+  CMD_WAIT = 1,    // 待機(ms)
+  CMD_END = 2      // 終了
 };
 
-// タスクフェーズ
-enum TaskPhase {
-  PHASE_IDLE = 0,
-  PHASE_MOVE_TO_WAYPOINT = 1,
-  PHASE_WAIT_AT_WAYPOINT = 2,
-  PHASE_MOVE_TO_TARGET = 3
-};
-
-// シナリオ設定構造体
-struct ScenarioConfig {
-  int targetAngle;           // 目標角度
-  int waypoint;              // 経由地角度
-  unsigned long waypointDelay;  // 経由地での遅延(ms)
-  const char* name;          // シナリオ名
+// コマンド構造体
+struct Command {
+  CommandType type;
+  int value;  // 角度または待機時間(ms)
 };
 
 // シナリオ定義配列
-// フォーマット: {targetAngle, waypoint, waypointDelay, name}
-const ScenarioConfig SCENARIO_CONFIGS[] = {
-  {167, 180, 800, "OFFにする"},     // 目標、経由地、待機
-  {130, 120, 800, "ONにする"}       // 目標、経由地、待機
+// フォーマット: {type, value} - type: CMD_MOVE(角度) or CMD_WAIT(ms) or CMD_END
+const Command OFF_COMMANDS[] = {
+  {CMD_MOVE, 180},    // 経由地180°へ移動
+  {CMD_WAIT, 800},    // 800ms待機
+  {CMD_MOVE, 167},    // 目標167°へ移動
+  {CMD_END, 0}        // 終了
+};
+
+const Command ON_COMMANDS[] = {
+  {CMD_MOVE, 120},    // 経由地120°へ移動
+  {CMD_WAIT, 800},    // 800ms待機
+  {CMD_MOVE, 130},    // 目標130°へ移動
+  {CMD_END, 0}        // 終了
+};
+
+// シナリオ定義構造体
+struct ScenarioDef {
+  const Command* commands;
+};
+
+// シナリオ配列（インデックスがシナリオID）
+const ScenarioDef SCENARIOS[] = {
+  {OFF_COMMANDS},   // 0: OFFにする
+  {ON_COMMANDS}     // 1: ONにする
 };
 
 // タスク実行コンテキスト
 struct TaskContext {
-  Scenario scenario;
-  TaskPhase phase;
-  unsigned long phaseStartTime;
-  int targetAngle;
-  int waypointAngle;
+  int scenario;              // シナリオID (-1: なし, 0: OFF, 1: ON)
+  int currentStep;           // 現在のコマンドインデックス
+  unsigned long stepStartTime;  // 現在のステップ開始時刻
 };
 
 // グローバル変数
@@ -55,9 +63,7 @@ Servo myServo;
 int currentAngle = 0;             // 初期位置（setupで設定）
 
 TaskContext currentTask = {
-  SCENARIO_NONE,
-  PHASE_IDLE,
-  0,
+  -1,  // シナリオなし
   0,
   0
 };
@@ -82,22 +88,13 @@ void log(const char* format, ...) {
 
 // ========== ヘルパー関数 ==========
 
-// シナリオ設定取得
-ScenarioConfig getScenarioConfig(Scenario scenario) {
-  if (scenario == SCENARIO_TURN_OFF)
-    return SCENARIO_CONFIGS[0];
-  if (scenario == SCENARIO_TURN_ON)
-    return SCENARIO_CONFIGS[1];
-  return {0, 0, 0, "NONE"};
-}
-
-// シナリオ選択
-Scenario selectScenario(int currentSwitchState, int lastDebouncedState) {
+// シナリオ選択（シナリオIDを返す）
+int selectScenario(int currentSwitchState, int lastDebouncedState) {
   if (lastDebouncedState == HIGH && currentSwitchState == LOW)
-    return SCENARIO_TURN_OFF;   // HIGH → LOW でOFFにする
+    return 0;   // HIGH → LOW でOFFにする
   else if (lastDebouncedState == LOW && currentSwitchState == HIGH)
-    return SCENARIO_TURN_ON;    // LOW → HIGH でONにする
-  return SCENARIO_NONE;
+    return 1;   // LOW → HIGH でONにする
+  return -1;    // シナリオなし
 }
 
 // 直接サーボ移動
@@ -110,47 +107,42 @@ void moveServoTo(int angle) {
 }
 
 // シナリオ起動
-void activateScenario(Scenario scenario) {
-  currentTask.scenario = scenario;
-  currentTask.phase = PHASE_MOVE_TO_WAYPOINT;
-  currentTask.phaseStartTime = millis();
+void activateScenario(int scenarioId) {
+  currentTask.scenario = scenarioId;
+  currentTask.currentStep = 0;
+  currentTask.stepStartTime = millis();
 
-  ScenarioConfig config = getScenarioConfig(scenario);
-  currentTask.targetAngle = config.targetAngle;
-  currentTask.waypointAngle = config.waypoint;
-
-  log("Scenario: %s (waypoint: %d→target: %d, delay: %lums)",
-      config.name, config.waypoint, config.targetAngle, config.waypointDelay);
+  log("Scenario started: %d", scenarioId);
 }
 
 // タスク実行エンジン
 void executeTask() {
-  switch (currentTask.phase) {
-    case PHASE_IDLE:
+  if (currentTask.scenario < 0)
+    return;
+
+  const Command* commands = SCENARIOS[currentTask.scenario].commands;
+  Command cmd = commands[currentTask.currentStep];
+
+  switch (cmd.type) {
+    case CMD_MOVE:
+      moveServoTo(cmd.value);
+      log("Step %d: Moved to %d°", currentTask.currentStep, cmd.value);
+      currentTask.currentStep++;
+      currentTask.stepStartTime = millis();
       break;
 
-    case PHASE_MOVE_TO_WAYPOINT:
-      moveServoTo(currentTask.waypointAngle);
-      log("Waypoint reached: %d", currentTask.waypointAngle);
-      currentTask.phase = PHASE_WAIT_AT_WAYPOINT;
-      currentTask.phaseStartTime = millis();
-      break;
-
-    case PHASE_WAIT_AT_WAYPOINT:
-      {
-        ScenarioConfig config = getScenarioConfig(currentTask.scenario);
-        if (millis() - currentTask.phaseStartTime >= config.waypointDelay) {
-          log("Waypoint wait complete");
-          currentTask.phase = PHASE_MOVE_TO_TARGET;
-        }
+    case CMD_WAIT:
+      if (millis() - currentTask.stepStartTime >= cmd.value) {
+        log("Step %d: Waited %lums", currentTask.currentStep, cmd.value);
+        currentTask.currentStep++;
+        currentTask.stepStartTime = millis();
       }
       break;
 
-    case PHASE_MOVE_TO_TARGET:
-      moveServoTo(currentTask.targetAngle);
-      log("Target reached: %d", currentTask.targetAngle);
-      currentTask.phase = PHASE_IDLE;
-      currentTask.scenario = SCENARIO_NONE;
+    case CMD_END:
+      log("Scenario complete");
+      currentTask.scenario = -1;
+      currentTask.currentStep = 0;
       break;
   }
 }
@@ -165,10 +157,15 @@ void setup() {
 
   // 初期スイッチ状態を読み取り、初期位置を設定
   int switchState = digitalRead(SWITCH_PIN);
-  ScenarioConfig initialConfig = (switchState == HIGH) ?
-    SCENARIO_CONFIGS[1] :  // ONにする
-    SCENARIO_CONFIGS[0];   // OFFにする
-  currentAngle = initialConfig.targetAngle;
+  // 各シナリオの最終移動コマンドを初期位置とする
+  int initialScenarioId = (switchState == HIGH) ? 1 : 0;  // HIGH=ON(1), LOW=OFF(0)
+  const Command* initialCommands = SCENARIOS[initialScenarioId].commands;
+
+  // 最後のCMD_MOVEコマンドを探す
+  for (int i = 0; initialCommands[i].type != CMD_END; i++) {
+    if (initialCommands[i].type == CMD_MOVE)
+      currentAngle = initialCommands[i].value;
+  }
 
   // デバウンス状態の初期化
   lastDebouncedState = switchState;
@@ -184,7 +181,7 @@ void setup() {
 }
 
 void loop() {
-  static TaskPhase lastPhase = PHASE_IDLE;  // 前回のフェーズ
+  static int lastStep = -1;  // 前回のステップ
 
   // 1. スイッチ読み取り
   int switchState = digitalRead(SWITCH_PIN);
@@ -205,13 +202,13 @@ void loop() {
   }
 
   // 4. シナリオ起動（IDLE時のみ）
-  if (currentTask.phase == PHASE_IDLE &&
+  if (currentTask.scenario < 0 &&
       (millis() - lastDebounceTime) >= DEBOUNCE_DELAY &&
       switchState != lastDebouncedState) {
 
-    Scenario scenario = selectScenario(switchState, lastDebouncedState);
-    if (scenario != SCENARIO_NONE) {
-      activateScenario(scenario);
+    int scenarioId = selectScenario(switchState, lastDebouncedState);
+    if (scenarioId >= 0) {
+      activateScenario(scenarioId);
     }
     lastDebouncedState = switchState;
   }
@@ -219,10 +216,9 @@ void loop() {
   // 5. タスク実行
   executeTask();
 
-  // 6. フェーズ変更ログ
-  if (currentTask.phase != lastPhase) {
-    ScenarioConfig config = getScenarioConfig(currentTask.scenario);
-    log("Phase: %d -> %d [%s]", lastPhase, currentTask.phase, config.name);
-    lastPhase = currentTask.phase;
+  // 6. ステップ変更ログ
+  if (currentTask.currentStep != lastStep) {
+    log("Step: %d -> %d", lastStep, currentTask.currentStep);
+    lastStep = currentTask.currentStep;
   }
 }
