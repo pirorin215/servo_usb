@@ -17,6 +17,11 @@ const int BUZZER_PIN = 6;     // ブザー
 const unsigned long DEBOUNCE_DELAY = 50;
 const unsigned long IR_COOLDOWN = 1000;  // チャタリング対策：1秒に変更
 
+// ブザー音の長さ定義
+const unsigned long BEEP_SHORT_DURATION = 100;
+const unsigned long BEEP_LONG_DURATION = 300;
+const unsigned long BEEP_GAP_DURATION = 100;
+
 // 独自IRパターン定義（NEC形式を採用）
 // NEC形式の正しい実装（32ビット完全版）
 // ビット0 = 560,560  ビット1 = 560,1680
@@ -110,29 +115,103 @@ int lastRawSwitchState = -1;
 // IR受信関連
 unsigned long lastIRReceiveTime = 0;
 
+// ブザー状態管理（非ブロッキング制御用）
+enum BuzzerPhase {
+  BUZZER_OFF,
+  BUZZER_BEEP1_ON,
+  BUZZER_BEEP1_OFF,
+  BUZZER_BEEP2_ON
+};
+
+struct BuzzerState {
+  bool active;
+  unsigned long phaseStartTime;
+  BuzzerPhase phase;
+  bool doubleBeep;  // ダブルビープモードかどうか
+};
+BuzzerState buzzerState = {false, 0, BUZZER_OFF, false};
+
 // ========== ヘルパー関数 ==========
 
-// ブザー音関数（digitalWriteで制御）
-void beepShort() {
+// ブザー更新関数（ループ内で呼び出し）
+void updateBuzzer() {
+  if (!buzzerState.active)
+    return;
+
+  unsigned long elapsed = millis() - buzzerState.phaseStartTime;
+
+  switch (buzzerState.phase) {
+    case BUZZER_BEEP1_ON:
+      if (elapsed >= BEEP_SHORT_DURATION) {
+        digitalWrite(BUZZER_PIN, LOW);
+        buzzerState.phase = BUZZER_BEEP1_OFF;
+        buzzerState.phaseStartTime = millis();
+      }
+      break;
+
+    case BUZZER_BEEP1_OFF:
+      if (elapsed >= BEEP_GAP_DURATION) {
+        if (buzzerState.doubleBeep) {
+          // ダブルビープ：2回目のビープ開始
+          buzzerState.phase = BUZZER_BEEP2_ON;
+          buzzerState.phaseStartTime = millis();
+          digitalWrite(BUZZER_PIN, HIGH);
+        } else {
+          // シングルビープ：終了
+          buzzerState.active = false;
+        }
+      }
+      break;
+
+    case BUZZER_BEEP2_ON:
+      if (elapsed >= BEEP_SHORT_DURATION) {
+        digitalWrite(BUZZER_PIN, LOW);
+        buzzerState.active = false;
+      }
+      break;
+
+    default:
+      buzzerState.active = false;
+      break;
+  }
+}
+
+// ブザー開始関数（非ブロッキング）
+void startShortBeep() {
+  buzzerState.active = true;
+  buzzerState.phaseStartTime = millis();
+  buzzerState.phase = BUZZER_BEEP1_ON;
+  buzzerState.doubleBeep = false;
   digitalWrite(BUZZER_PIN, HIGH);
-  delay(100);
-  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void startLongBeep() {
+  buzzerState.active = true;
+  buzzerState.phaseStartTime = millis();
+  buzzerState.phase = BUZZER_BEEP2_ON;
+  buzzerState.doubleBeep = false;
+  digitalWrite(BUZZER_PIN, HIGH);
+}
+
+void startDoubleBeep() {
+  buzzerState.active = true;
+  buzzerState.phaseStartTime = millis();
+  buzzerState.phase = BUZZER_BEEP1_ON;
+  buzzerState.doubleBeep = true;
+  digitalWrite(BUZZER_PIN, HIGH);
+}
+
+// 既存のインターフェースを維持（下位互換性）
+void beepShort() {
+  startShortBeep();
 }
 
 void beepLong() {
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(300);
-  digitalWrite(BUZZER_PIN, LOW);
+  startLongBeep();
 }
 
 void beepDouble() {
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(100);
-  digitalWrite(BUZZER_PIN, LOW);
-  delay(100);
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(100);
-  digitalWrite(BUZZER_PIN, LOW);
+  startDoubleBeep();
 }
 
 // 赤外線信号送信（3.9.0対応）
@@ -354,6 +433,9 @@ void setup() {
 
 void loop() {
   static int lastStep = -1;
+
+  // ブザー状態更新（非ブロッキング）
+  updateBuzzer();
 
   // スイッチ処理
   int switchState = digitalRead(SWITCH_PIN);
