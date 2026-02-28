@@ -70,11 +70,11 @@ struct Command {
 };
 
 const Command OFF_COMMANDS[] = {
-  {CMD_MOVE, 180}, {CMD_WAIT, 800}, {CMD_MOVE, 167}, {CMD_END, 0}
+  {CMD_MOVE, 160}, {CMD_WAIT, 800}, {CMD_MOVE, 147}, {CMD_END, 0}
 };
 
 const Command ON_COMMANDS[] = {
-  {CMD_MOVE, 120}, {CMD_WAIT, 800}, {CMD_MOVE, 130}, {CMD_END, 0}
+  {CMD_MOVE,  80}, {CMD_WAIT, 800}, {CMD_MOVE,  90}, {CMD_END, 0}
 };
 
 struct ScenarioDef {
