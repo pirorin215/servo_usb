@@ -11,6 +11,7 @@ const int SERVO_PIN = 5;
 const int SWITCH_PIN = 4;
 const int IR_LED_PIN = 3;     // 赤外線LED（送信）
 const int IR_RECV_PIN = 2;    // 赤外線受信モジュール
+const int BUZZER_PIN = 6;     // ブザー
 
 // 定義値
 const unsigned long DEBOUNCE_DELAY = 50;
@@ -111,6 +112,29 @@ unsigned long lastIRReceiveTime = 0;
 
 // ========== ヘルパー関数 ==========
 
+// ブザー音関数（digitalWriteで制御）
+void beepShort() {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(100);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void beepLong() {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(300);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void beepDouble() {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(100);
+  digitalWrite(BUZZER_PIN, LOW);
+  delay(100);
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(100);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
 // 赤外線信号送信（3.9.0対応）
 void sendIRSignal(int state) {
   Serial.print("IR sending:");
@@ -187,8 +211,11 @@ void activateScenario(int scenarioId) {
   currentTask.currentStep = 0;
   currentTask.stepStartTime = millis();
 
-  if (scenarioId == 0) logicalState = 0;
-  else if (scenarioId == 1) logicalState = 1;
+  if (scenarioId == 0) {
+    logicalState = 0;
+  } else if (scenarioId == 1) {
+    logicalState = 1;
+  }
 
   Serial.print("Act:");
   Serial.println(logicalState);
@@ -219,21 +246,13 @@ void handleIRReception() {
       // 0x02 またはその反転 0xFD → OFF
       if (address == 0x00) {
         if (command == 0x01 || command == 0x80) {  // ONコマンド
-          // 現在ON状態なら無視（チャタリング対策）
-          if (logicalState == 1) {
-            Serial.println("-> ON (ignored, already ON)");
-          } else {
-            Serial.println("-> ON");
-            activateScenario(1);
-          }
+          Serial.println("-> ON");
+          beepLong();  // ON信号受信: ピーー
+          activateScenario(1);
         } else if (command == 0x02 || command == 0xFD) {  // OFFコマンド
-          // 現在OFF状態なら無視（チャタリング対策）
-          if (logicalState == 0) {
-            Serial.println("-> OFF (ignored, already OFF)");
-          } else {
-            Serial.println("-> OFF");
-            activateScenario(0);
-          }
+          Serial.println("-> OFF");
+          beepDouble();  // OFF信号受信: ピッピッ
+          activateScenario(0);
         } else {
           Serial.print("-> UNKNOWN cmd:0x");
           Serial.println(command, HEX);
@@ -299,11 +318,15 @@ void setup() {
   //while (!Serial);
 
   pinMode(SWITCH_PIN, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
   myServo.attach(SERVO_PIN);
 
   // IRremote 3.9.0: begin()を使用
   IrReceiver.begin(IR_RECV_PIN, ENABLE_LED_FEEDBACK);
   IrSender.begin(IR_LED_PIN, DISABLE_LED_FEEDBACK);
+
+  // USB通電検知時: ピッ
+  beepShort();
 
   Serial.println("START");
 
