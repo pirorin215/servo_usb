@@ -60,7 +60,8 @@ const int OFF_PATTERN_LEN = sizeof(OFF_PATTERN) / sizeof(OFF_PATTERN[0]);
 enum CommandType {
   CMD_MOVE = 0,
   CMD_WAIT = 1,
-  CMD_END = 2
+  CMD_DETACH = 2,
+  CMD_END = 3
 };
 
 // コマンド構造体
@@ -70,11 +71,11 @@ struct Command {
 };
 
 const Command OFF_COMMANDS[] = {
-  {CMD_MOVE, 160}, {CMD_WAIT, 800}, {CMD_MOVE, 147}, {CMD_END, 0}
+  {CMD_MOVE, 160}, {CMD_WAIT, 800}, {CMD_MOVE, 147}, {CMD_DETACH, 0}, {CMD_END, 0}
 };
 
 const Command ON_COMMANDS[] = {
-  {CMD_MOVE,  80}, {CMD_WAIT, 800}, {CMD_MOVE,  90}, {CMD_END, 0}
+  {CMD_MOVE,  80}, {CMD_WAIT, 800}, {CMD_MOVE,  90}, {CMD_DETACH, 0}, {CMD_END, 0}
 };
 
 struct ScenarioDef {
@@ -96,6 +97,7 @@ Servo myServo;
 int currentAngle = 0;
 int logicalState = -1;
 uint16_t sendBuf[70];  // NEC完全形式用バッファ（67要素必要）
+bool servoAttached = true;  // サーボのアタッチ状態を追跡
 
 TaskContext currentTask = {-1, 0, 0};
 
@@ -169,6 +171,12 @@ int selectScenarioFromSwitch(int currentSwitchState, int lastDebouncedState) {
 
 void moveServoTo(int angle) {
   if (currentAngle != angle) {
+    // デタッチ状態ならアタッチ
+    if (!servoAttached) {
+      myServo.attach(SERVO_PIN);
+      servoAttached = true;
+      Serial.println("Servo attached");
+    }
     myServo.write(angle);
     currentAngle = angle;
   }
@@ -267,6 +275,15 @@ void executeTask() {
         currentTask.currentStep++;
         currentTask.stepStartTime = millis();
       }
+      break;
+
+    case CMD_DETACH:
+      if (servoAttached) {
+        myServo.detach();
+        servoAttached = false;
+        Serial.println("Servo detached (low power mode)");
+      }
+      currentTask.currentStep++;
       break;
 
     case CMD_END:
