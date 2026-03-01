@@ -1,1 +1,1 @@
-arduino-cli upload -p /dev/cu.usbmodem8 -b arduino:avr:leonardo servo_usb.ino
+arduino-cli upload -p /dev/cu.usbmodemHIDEF1 -b arduino:avr:leonardo servo_usb.ino

@@ -3,10 +3,11 @@
 // 赤外線送受信機能でスマートリモコンと連携
 // IRremote 3.9.0対応
 // 赤外線学習機能対応
+// HID-Projectライブラリ使用（Keyboard + Consumer Page対応）
 
 #include <Servo.h>
 #include <IRremote.hpp>  // 赤外線送受信ライブラリ 3.9.0
-#include <Keyboard.h>    // HIDキーボード機能
+#include <HID-Project.h> // HID-Project: Keyboard + Consumer対応
 #include <EEPROM.h>      // EEPROMアクセス
 
 // ピン設定
@@ -20,8 +21,16 @@ const int BUZZER_PIN = 6;     // ブザー
 const unsigned long DEBOUNCE_DELAY = 50;
 const unsigned long IR_COOLDOWN = 1000;  // チャタリング対策：1秒に変更
 
-// HIDキーコード定数（未定義の無効なキーコード）
-const uint8_t WAKE_KEYCODE = 0xA5;
+// HIDキーコード定数（HID-Project形式）
+const uint8_t WAKE_KEYCODE = 0xA5;           // Keyboard: 未定義キーでディスプレイウェイク
+const uint16_t PLAYPAUSE_KEYCODE = MEDIA_PLAY_PAUSE;  // Consumer: Play/Pause (HID-Project定義済み)
+
+// RAW照合パラメータ
+const uint16_t MATCH_TOLERANCE_US = 200;   // 絶対誤差[μs]
+const uint8_t  MATCH_TOLERANCE_PCT = 20;    // 相対誤差[%]
+const uint8_t  MATCH_LEN_TOLERANCE = 2;     // パターン長の許容差
+const uint8_t  MATCH_THRESHOLD_PCT = 85;    // 一致とみなす最低一致率[%]
+const uint8_t  STRICT_MATCH_COUNT = 10;    // 最初のN要素は厳密に一致させる
 
 // キーボード初期化フラグ
 bool keyboard_initialized = false;
@@ -37,13 +46,14 @@ enum CommandType {
   CMD_WAIT = 1,
   CMD_DETACH = 2,
   CMD_END = 3,
-  CMD_KEY = 4
+  CMD_KEY = 4,        // Keyboardキー
+  CMD_CONSUMER = 5    // Consumerキー（Play/Pauseなど）
 };
 
 // コマンド構造体
 struct Command {
   CommandType type;
-  int value;
+  uint16_t value;  // HIDキーコード（Keyboard: 8bit, Consumer: 16bit）
 };
 
 const Command OFF_COMMANDS[] = {
@@ -70,20 +80,52 @@ struct TaskContext {
 
 // EEPROM設定
 const uint16_t MAX_PATTERN_LENGTH = 70;
-const char EEPROM_MAGIC[] = "IRL2";
+const char EEPROM_MAGIC[] = "IRL5";  // バージョンアップ（プロトコル情報追加）
 const int EEPROM_MAGIC_ADDR = 0;
+
+// 各パターンのEEPROM配置（RAWデータ + プロトコル情報）
 const int EEPROM_ON_LEN_ADDR = 4;
-const int EEPROM_ON_DATA_ADDR = 5;
-const int EEPROM_OFF_LEN_ADDR = 150;
-const int EEPROM_OFF_DATA_ADDR = 151;
+const int EEPROM_ON_DATA_ADDR = 5;              // 5 〜 144 (RAW: 140バイト)
+const int EEPROM_ON_PROTOCOL_ADDR = 145;        // 145
+const int EEPROM_ON_ADDR_ADDR = 146;            // 146
+const int EEPROM_ON_CMD_ADDR = 147;              // 147
+
+const int EEPROM_OFF_LEN_ADDR = 148;
+const int EEPROM_OFF_DATA_ADDR = 149;            // 149 〜 288 (RAW: 140バイト)
+const int EEPROM_OFF_PROTOCOL_ADDR = 289;       // 289
+const int EEPROM_OFF_ADDR_ADDR = 290;           // 290
+const int EEPROM_OFF_CMD_ADDR = 291;             // 291
+
+const int EEPROM_PLAYPAUSE_LEN_ADDR = 292;
+const int EEPROM_PLAYPAUSE_DATA_ADDR = 293;     // 293 〜 432 (RAW: 140バイト)
+const int EEPROM_PLAYPAUSE_PROTOCOL_ADDR = 437;  // 437
+const int EEPROM_PLAYPAUSE_ADDR_ADDR = 438;      // 438
+const int EEPROM_PLAYPAUSE_CMD_ADDR = 439;        // 439
 
 // 学習モード
 enum LearnMode {
   LEARN_NONE,
   LEARN_ON,
-  LEARN_OFF
+  LEARN_OFF,
+  LEARN_PLAYPAUSE
 };
 LearnMode learnMode = LEARN_NONE;
+
+// パターンタイプ
+enum PatternType {
+  PATTERN_ON,
+  PATTERN_OFF,
+  PATTERN_PLAYPAUSE
+};
+
+// 学習したプロトコル情報
+struct PatternProtocolInfo {
+  bool isValid;
+  uint8_t protocol;
+  uint8_t address;
+  uint8_t command;
+};
+
 uint16_t learnedPattern[70];
 uint8_t learnedPatternLength = 0;
 bool eepromValid = false;
@@ -211,7 +253,9 @@ bool checkEEPROMValid() {
   for (int i = 0; i < 4; i++) {
     magic[i] = EEPROM.read(EEPROM_MAGIC_ADDR + i);
   }
-  return (magic[0] == 'I' && magic[1] == 'R' && magic[2] == 'L' && magic[3] == '2');
+  // IRL3, IRL4, IRL5 のいずれかを受け入れる（下位互換性）
+  return (magic[0] == 'I' && magic[1] == 'R' && magic[2] == 'L' &&
+          (magic[3] == '3' || magic[3] == '4' || magic[3] == '5'));
 }
 
 void writeMagicNumber() {
@@ -220,32 +264,82 @@ void writeMagicNumber() {
   }
 }
 
-void savePatternToEEPROM(bool isOnPattern, const uint16_t* pattern, uint8_t len) {
-  int lenAddr = isOnPattern ? EEPROM_ON_LEN_ADDR : EEPROM_OFF_LEN_ADDR;
-  int dataAddr = isOnPattern ? EEPROM_ON_DATA_ADDR : EEPROM_OFF_DATA_ADDR;
+void savePatternToEEPROM(PatternType patternType, const uint16_t* pattern, uint8_t len,
+                           uint8_t protocol, uint8_t address, uint8_t command) {
+  int lenAddr, dataAddr, protocolAddr, addrAddr, cmdAddr;
+  const char* name;
 
+  switch (patternType) {
+    case PATTERN_ON:
+      lenAddr = EEPROM_ON_LEN_ADDR;
+      dataAddr = EEPROM_ON_DATA_ADDR;
+      protocolAddr = EEPROM_ON_PROTOCOL_ADDR;
+      addrAddr = EEPROM_ON_ADDR_ADDR;
+      cmdAddr = EEPROM_ON_CMD_ADDR;
+      name = "ON";
+      break;
+    case PATTERN_OFF:
+      lenAddr = EEPROM_OFF_LEN_ADDR;
+      dataAddr = EEPROM_OFF_DATA_ADDR;
+      protocolAddr = EEPROM_OFF_PROTOCOL_ADDR;
+      addrAddr = EEPROM_OFF_ADDR_ADDR;
+      cmdAddr = EEPROM_OFF_CMD_ADDR;
+      name = "OFF";
+      break;
+    case PATTERN_PLAYPAUSE:
+      lenAddr = EEPROM_PLAYPAUSE_LEN_ADDR;
+      dataAddr = EEPROM_PLAYPAUSE_DATA_ADDR;
+      protocolAddr = EEPROM_PLAYPAUSE_PROTOCOL_ADDR;
+      addrAddr = EEPROM_PLAYPAUSE_ADDR_ADDR;
+      cmdAddr = EEPROM_PLAYPAUSE_CMD_ADDR;
+      name = "PLAYPAUSE";
+      break;
+  }
+
+  // RAWデータを保存
   EEPROM.update(lenAddr, len);
-
   for (int i = 0; i < len && i < MAX_PATTERN_LENGTH; i++) {
     EEPROM.update(dataAddr + (i * 2), lowByte(pattern[i]));
     EEPROM.update(dataAddr + (i * 2) + 1, highByte(pattern[i]));
   }
 
+  // プロトコル情報を保存
+  EEPROM.update(protocolAddr, protocol);
+  EEPROM.update(addrAddr, address);
+  EEPROM.update(cmdAddr, command);
+
   writeMagicNumber();
   eepromValid = true;
 
   Serial.print("Saved ");
-  Serial.print(isOnPattern ? "ON" : "OFF");
-  Serial.print(" pattern to EEPROM (len=");
+  Serial.print(name);
+  Serial.print(" pattern (len=");
   Serial.print(len);
-  Serial.println(")");
+  Serial.print(") addr=0x");
+  Serial.print(address, HEX);
+  Serial.print(" cmd=0x");
+  Serial.println(command, HEX);
 }
 
-bool loadPatternFromEEPROM(bool isOnPattern, uint16_t* pattern, uint8_t* len) {
+bool loadPatternFromEEPROM(PatternType patternType, uint16_t* pattern, uint8_t* len) {
   if (!eepromValid) return false;
 
-  int lenAddr = isOnPattern ? EEPROM_ON_LEN_ADDR : EEPROM_OFF_LEN_ADDR;
-  int dataAddr = isOnPattern ? EEPROM_ON_DATA_ADDR : EEPROM_OFF_DATA_ADDR;
+  int lenAddr, dataAddr;
+
+  switch (patternType) {
+    case PATTERN_ON:
+      lenAddr = EEPROM_ON_LEN_ADDR;
+      dataAddr = EEPROM_ON_DATA_ADDR;
+      break;
+    case PATTERN_OFF:
+      lenAddr = EEPROM_OFF_LEN_ADDR;
+      dataAddr = EEPROM_OFF_DATA_ADDR;
+      break;
+    case PATTERN_PLAYPAUSE:
+      lenAddr = EEPROM_PLAYPAUSE_LEN_ADDR;
+      dataAddr = EEPROM_PLAYPAUSE_DATA_ADDR;
+      break;
+  }
 
   *len = EEPROM.read(lenAddr);
   if (*len == 0 || *len > MAX_PATTERN_LENGTH) return false;
@@ -255,6 +349,43 @@ bool loadPatternFromEEPROM(bool isOnPattern, uint16_t* pattern, uint8_t* len) {
   }
 
   return true;
+}
+
+PatternProtocolInfo loadProtocolInfo(PatternType patternType) {
+  PatternProtocolInfo info = {false, 0, 0, 0};
+  int protocolAddr, addrAddr, cmdAddr;
+
+  switch (patternType) {
+    case PATTERN_ON:
+      protocolAddr = EEPROM_ON_PROTOCOL_ADDR;
+      addrAddr = EEPROM_ON_ADDR_ADDR;
+      cmdAddr = EEPROM_ON_CMD_ADDR;
+      break;
+    case PATTERN_OFF:
+      protocolAddr = EEPROM_OFF_PROTOCOL_ADDR;
+      addrAddr = EEPROM_OFF_ADDR_ADDR;
+      cmdAddr = EEPROM_OFF_CMD_ADDR;
+      break;
+    case PATTERN_PLAYPAUSE:
+      protocolAddr = EEPROM_PLAYPAUSE_PROTOCOL_ADDR;
+      addrAddr = EEPROM_PLAYPAUSE_ADDR_ADDR;
+      cmdAddr = EEPROM_PLAYPAUSE_CMD_ADDR;
+      break;
+  }
+
+  info.protocol = EEPROM.read(protocolAddr);
+  info.address = EEPROM.read(addrAddr);
+  info.command = EEPROM.read(cmdAddr);
+
+  // プロトコルが0以外なら有効とみなす
+  info.isValid = (info.protocol != 0);
+
+  return info;
+}
+
+bool hasProtocolInfo(PatternType patternType) {
+  PatternProtocolInfo info = loadProtocolInfo(patternType);
+  return info.isValid;
 }
 
 void resetEEPROMPatterns() {
@@ -282,6 +413,12 @@ void handleSerialCommands() {
       startShortBeep();
       Serial.println("Send OFF signal...");
 
+    } else if (cmd == "LEARN_PLAYPAUSE") {
+      learnMode = LEARN_PLAYPAUSE;
+      Serial.println("OK LEARN_PLAYPAUSE");
+      startShortBeep();
+      Serial.println("Send PLAYPAUSE signal...");
+
     } else if (cmd == "RESET_PATTERNS") {
       resetEEPROMPatterns();
       Serial.println("OK RESET");
@@ -291,12 +428,23 @@ void handleSerialCommands() {
 
       uint8_t len;
       uint16_t pattern[MAX_PATTERN_LENGTH];
+      PatternProtocolInfo proto;
 
       // ONパターン
-      if (loadPatternFromEEPROM(true, pattern, &len)) {
+      if (loadPatternFromEEPROM(PATTERN_ON, pattern, &len)) {
         Serial.print("ON Pattern (len=");
         Serial.print(len);
-        Serial.println("):");
+        proto = loadProtocolInfo(PATTERN_ON);
+        if (proto.isValid) {
+          Serial.print(") Protocol:");
+          Serial.print(proto.protocol);
+          Serial.print(" Addr:0x");
+          Serial.print(proto.address, HEX);
+          Serial.print(" Cmd:0x");
+          Serial.println(proto.command, HEX);
+        } else {
+          Serial.println(") - RAW only");
+        }
         Serial.print("[");
         for (int i = 0; i < len && i < 30; i++) {
           Serial.print(pattern[i]);
@@ -309,10 +457,20 @@ void handleSerialCommands() {
       }
 
       // OFFパターン
-      if (loadPatternFromEEPROM(false, pattern, &len)) {
+      if (loadPatternFromEEPROM(PATTERN_OFF, pattern, &len)) {
         Serial.print("OFF Pattern (len=");
         Serial.print(len);
-        Serial.println("):");
+        proto = loadProtocolInfo(PATTERN_OFF);
+        if (proto.isValid) {
+          Serial.print(") Protocol:");
+          Serial.print(proto.protocol);
+          Serial.print(" Addr:0x");
+          Serial.print(proto.address, HEX);
+          Serial.print(" Cmd:0x");
+          Serial.println(proto.command, HEX);
+        } else {
+          Serial.println(") - RAW only");
+        }
         Serial.print("[");
         for (int i = 0; i < len && i < 30; i++) {
           Serial.print(pattern[i]);
@@ -324,32 +482,127 @@ void handleSerialCommands() {
         Serial.println("OFF Pattern: NOT FOUND");
       }
 
+      // PLAYPAUSEパターン
+      if (loadPatternFromEEPROM(PATTERN_PLAYPAUSE, pattern, &len)) {
+        Serial.print("PLAYPAUSE Pattern (len=");
+        Serial.print(len);
+        proto = loadProtocolInfo(PATTERN_PLAYPAUSE);
+        if (proto.isValid) {
+          Serial.print(") Protocol:");
+          Serial.print(proto.protocol);
+          Serial.print(" Addr:0x");
+          Serial.print(proto.address, HEX);
+          Serial.print(" Cmd:0x");
+          Serial.println(proto.command, HEX);
+        } else {
+          Serial.println(") - RAW only");
+        }
+        Serial.print("[");
+        for (int i = 0; i < len && i < 30; i++) {
+          Serial.print(pattern[i]);
+          if (i < len - 1 && i < 29) Serial.print(",");
+        }
+        if (len > 30) Serial.print("...");
+        Serial.println("]");
+      } else {
+        Serial.println("PLAYPAUSE Pattern: NOT FOUND");
+      }
+
       Serial.println("==================");
     }
   }
 }
 
-// Raw HIDキー送信関数（無効なキーコードを送信してディスプレイを起こす）
-void sendRawHIDKey(uint8_t hidKeycode) {
-  Serial.print("HID key:0x");
-  Serial.println(hidKeycode, HEX);
+// ========== RAW波形照合 ==========
 
-  // 初回使用時のみKeyboard.begin()を呼ぶ
-  if (!keyboard_initialized) {
-    Serial.println("Keyboard init");
-    Keyboard.begin();
-    delay(1000);
-    keyboard_initialized = true;
+// 1パルスが一致しているか（絶対誤差 OR 相対誤差）
+bool pulseMatches(uint16_t a, uint16_t b) {
+  uint16_t diff = (a > b) ? (a - b) : (b - a);
+  if (diff <= MATCH_TOLERANCE_US) return true;
+  uint16_t larger = (a > b) ? a : b;
+  if (larger == 0) return true;
+  // 相対誤差チェック（整数演算）
+  if ((uint32_t)diff * 100 <= (uint32_t)larger * MATCH_TOLERANCE_PCT) return true;
+  return false;
+}
+
+// 受信RAWパターンと保存済みパターンの類似度を計算（0〜100%）
+int calcMatchScore(const uint16_t* stored, uint8_t storedLen,
+                   const uint16_t* received, uint16_t receivedLen) {
+  // パターン長チェック
+  int lenDiff = (int)receivedLen - (int)storedLen;
+  if (lenDiff < 0) lenDiff = -lenDiff;
+  if (lenDiff > MATCH_LEN_TOLERANCE) return -1;
+
+  // 短い方の長さで比較
+  uint8_t compareLen = (storedLen < receivedLen) ? storedLen : (uint8_t)receivedLen;
+  if (compareLen == 0) return -1;
+
+  uint8_t matched = 0;
+  uint8_t strictMatched = 0;  // 厳密モードで一致した数
+
+  // 最初のSTRICT_MATCH_COUNT要素は厳密に比較
+  for (uint8_t i = 0; i < compareLen; i++) {
+    bool strictMode = (i < STRICT_MATCH_COUNT && i < (uint8_t)STRICT_MATCH_COUNT && i < storedLen && i < receivedLen);
+
+    if (strictMode) {
+      // 厳密モード：完全一致に近い必要がある
+      uint16_t diff = (stored[i] > received[i]) ? (stored[i] - received[i]) : (received[i] - stored[i]);
+      if (diff <= 2) {  // 2μs以内なら一致とみなす
+        strictMatched++;
+        matched++;
+      }
+    } else {
+      // 緩いモード：通常の許容値
+      if (pulseMatches(stored[i], received[i])) matched++;
+    }
   }
 
-  uint8_t buf[8] = {0};
-  buf[2] = hidKeycode;
-  HID().SendReport(2, buf, 8);
-  delay(50);
-  memset(buf, 0, 8);
-  HID().SendReport(2, buf, 8);
+  // デバッグ：厳密モードでの一致数を表示
+  Serial.print("  StrictMatch: "); Serial.print(strictMatched); Serial.print("/"); Serial.println(STRICT_MATCH_COUNT);
 
-  Serial.println("HID sent");
+  return (int)matched * 100 / compareLen;
+}
+
+// 受信RAWパターンが指定パターンタイプと一致するか判定
+bool matchesStoredPattern(PatternType patternType,
+                           const uint16_t* received, uint16_t receivedLen) {
+  uint16_t stored[MAX_PATTERN_LENGTH];
+  uint8_t storedLen = 0;
+
+  if (!loadPatternFromEEPROM(patternType, stored, &storedLen)) return false;
+
+  int score = calcMatchScore(stored, storedLen, received, receivedLen);
+
+  // デバッグ出力
+  const char* name;
+  switch (patternType) {
+    case PATTERN_ON:        name = "ON";        break;
+    case PATTERN_OFF:       name = "OFF";       break;
+    case PATTERN_PLAYPAUSE: name = "PLAYPAUSE"; break;
+  }
+  Serial.print("  Match "); Serial.print(name);
+  Serial.print(": "); Serial.print(score); Serial.println("%");
+
+  return (score >= MATCH_THRESHOLD_PCT);
+}
+
+// HID Keyboardキー送信
+void sendKeyboardKey(uint8_t keycode) {
+  Serial.print("HID Keyboard:0x");
+  Serial.println(keycode, HEX);
+
+  Keyboard.write(keycode);
+  Serial.println("HID Keyboard sent");
+}
+
+// HID Consumerキー送信（Play/Pauseなど）
+void sendConsumerKey(uint16_t keycode) {
+  Serial.print("HID Consumer:0x");
+  Serial.println(keycode, HEX);
+
+  Consumer.write(keycode);
+  Serial.println("HID Consumer sent");
 }
 
 // 赤外線信号送信（3.9.0対応、EEPROMのみ）
@@ -358,17 +611,11 @@ void sendIRSignal(int state) {
   Serial.print(state == 1 ? "ON" : "OFF");
 
   uint8_t patternLen;
+  PatternType ptype = (state == 1) ? PATTERN_ON : PATTERN_OFF;
 
-  if (state == 1) {
-    if (!loadPatternFromEEPROM(true, sendBuf, &patternLen)) {
-      Serial.println(" - ERROR: ON pattern not learned!");
-      return;
-    }
-  } else {
-    if (!loadPatternFromEEPROM(false, sendBuf, &patternLen)) {
-      Serial.println(" - ERROR: OFF pattern not learned!");
-      return;
-    }
+  if (!loadPatternFromEEPROM(ptype, sendBuf, &patternLen)) {
+    Serial.println(" - ERROR: pattern not learned!");
+    return;
   }
 
   Serial.print(" len:");
@@ -439,116 +686,191 @@ void activateScenario(int scenarioId) {
   sendIRSignal(logicalState);
 }
 
-// 赤外線受信処理（NECデコーダー使用、学習モード対応）
+// 赤外線受信処理（RAW波形照合方式）
 void handleIRReception() {
   if (millis() - lastIRReceiveTime < IR_COOLDOWN)
     return;
 
-  if (IrReceiver.decode()) {
-    lastIRReceiveTime = millis();
+  if (!IrReceiver.decode()) return;
 
-    // デバッグ：受信情報をダンプ（通常モード時）
-    if (learnMode == LEARN_NONE) {
-      Serial.print("IR RX Protocol:");
-      Serial.print(IrReceiver.decodedIRData.protocol);
-      Serial.print(" Addr:0x");
-      Serial.print(IrReceiver.decodedIRData.address, HEX);
-      Serial.print(" Cmd:0x");
-      Serial.println(IrReceiver.decodedIRData.command, HEX);
+  lastIRReceiveTime = millis();
 
-      // RAWパターンもダンプ
-      if (IrReceiver.decodedIRData.rawDataPtr != nullptr) {
-        uint16_t rawLen = IrReceiver.decodedIRData.rawDataPtr->rawlen;
-        Serial.print("Raw [");
-        for (uint16_t i = 1; i < rawLen && i < 21; i++) {
-          Serial.print(IrReceiver.decodedIRData.rawDataPtr->rawbuf[i]);
-          if (i < rawLen - 1 && i < 20) Serial.print(",");
-        }
-        if (rawLen > 21) Serial.print("...");
-        Serial.println("]");
+  // RAWデータ取得
+  if (IrReceiver.decodedIRData.rawDataPtr == nullptr) {
+    Serial.println("IR: no raw data");
+    IrReceiver.resume();
+    return;
+  }
+
+  // NECリピート信号を無視（rawlenが短すぎる場合はリピート）
+  uint16_t rawLen = IrReceiver.decodedIRData.rawDataPtr->rawlen;
+  if (rawLen < 10) {
+    Serial.print("IR: repeat signal ignored (rawLen=");
+    Serial.print(rawLen);
+    Serial.println(")");
+    IrReceiver.resume();
+    return;
+  }
+
+  // rawbuf[0]はギャップなので1始まりで読む
+  // 実際の信号長は rawLen-1
+  uint16_t sigLen = rawLen - 1;
+  uint16_t rxBuf[MAX_PATTERN_LENGTH + 5];
+
+  if (sigLen > MAX_PATTERN_LENGTH + 4) sigLen = MAX_PATTERN_LENGTH + 4;
+  for (uint16_t i = 0; i < sigLen; i++) {
+    rxBuf[i] = IrReceiver.decodedIRData.rawDataPtr->rawbuf[i + 1];
+  }
+
+  // ========== 学習モード ==========
+  if (learnMode != LEARN_NONE) {
+    Serial.print("Learn: rawLen=");
+    Serial.println(rawLen);
+
+    if (sigLen >= 3 && sigLen <= MAX_PATTERN_LENGTH) {
+      for (uint16_t i = 0; i < sigLen; i++) learnedPattern[i] = rxBuf[i];
+      learnedPatternLength = (uint8_t)sigLen;
+
+      Serial.print("Pattern [");
+      for (int i = 0; i < learnedPatternLength && i < 20; i++) {
+        Serial.print(learnedPattern[i]);
+        if (i < learnedPatternLength - 1 && i < 19) Serial.print(",");
       }
-    }
+      if (learnedPatternLength > 20) Serial.print("...");
+      Serial.println("]");
 
-    // 学習モード中の処理
-    if (learnMode != LEARN_NONE) {
-      if (IrReceiver.decodedIRData.rawDataPtr != nullptr) {
-        uint16_t rawLen = IrReceiver.decodedIRData.rawDataPtr->rawlen;
-
-        Serial.print("Learn: rawLen=");
-        Serial.println(rawLen);
-
-        if (rawLen > 1 && rawLen <= MAX_PATTERN_LENGTH + 1) {
-          // パターンをコピー（rawbufの値を直接使用）
-          for (uint16_t i = 0; i < rawLen - 1; i++) {
-            learnedPattern[i] = IrReceiver.decodedIRData.rawDataPtr->rawbuf[i + 1];
-          }
-          learnedPatternLength = rawLen - 1;
-
-          // パターンをダンプ
-          Serial.print("Pattern [");
-          for (int i = 0; i < learnedPatternLength && i < 20; i++) {
-            Serial.print(learnedPattern[i]);
-            if (i < learnedPatternLength - 1 && i < 19) Serial.print(",");
-          }
-          if (learnedPatternLength > 20) Serial.print("...");
-          Serial.println("]");
-
-          // EEPROMに保存
-          savePatternToEEPROM(learnMode == LEARN_ON, learnedPattern, learnedPatternLength);
-
-          startDoubleBeep();
-          Serial.print("Learned ");
-          Serial.print(learnMode == LEARN_ON ? "ON" : "OFF");
-          Serial.print(" pattern (len=");
-          Serial.print(learnedPatternLength);
-          Serial.println(")");
-
-        } else {
-          Serial.println("Pattern length error");
-          startLongBeep();
-        }
-      } else {
-        Serial.println("No RAW data");
-        startLongBeep();
-      }
-
-      learnMode = LEARN_NONE;
-      IrReceiver.resume();
-      return;
-    }
-
-    // 通常モード中の処理
-    // NECプロトコルとして解析できた場合
-    if (IrReceiver.decodedIRData.protocol == NEC) {
+      // プロトコル情報を取得
+      uint8_t protocol = IrReceiver.decodedIRData.protocol;
       uint8_t address = IrReceiver.decodedIRData.address;
       uint8_t command = IrReceiver.decodedIRData.command;
 
-      // スマートリモコン対応: address=0x82
-      if (address == 0x82) {
-        if (command == 0x26) {  // ONコマンド（スマートリモコン）
-          Serial.println("-> ON (smart remote)");
-          beepLong();
-          activateScenario(1);
-        } else if (command == 0x3E) {  // OFFコマンド（スマートリモコン）
-          Serial.println("-> OFF (smart remote)");
-          beepDouble();
-          activateScenario(0);
-        } else {
-          Serial.print("-> UNKNOWN cmd:0x");
-          Serial.println(command, HEX);
-        }
+      Serial.print("Protocol: ");
+      Serial.print(protocol);
+      if (protocol != UNKNOWN) {
+        Serial.print(" Addr:0x");
+        Serial.print(address, HEX);
+        Serial.print(" Cmd:0x");
+        Serial.println(command, HEX);
       } else {
-        Serial.print("-> UNKNOWN addr:0x");
-        Serial.println(address, HEX);
+        Serial.println(" (RAW only)");
       }
 
+      PatternType ptype;
+      const char* pname;
+      if      (learnMode == LEARN_ON)        { ptype = PATTERN_ON;        pname = "ON"; }
+      else if (learnMode == LEARN_OFF)       { ptype = PATTERN_OFF;       pname = "OFF"; }
+      else                                   { ptype = PATTERN_PLAYPAUSE; pname = "PLAYPAUSE"; }
+
+      // プロトコル情報付きで保存
+      savePatternToEEPROM(ptype, learnedPattern, learnedPatternLength, protocol, address, command);
+      startDoubleBeep();
+      Serial.print("Learned ");
+      Serial.print(pname);
+      Serial.print(" pattern (len=");
+      Serial.print(learnedPatternLength);
+      Serial.println(")");
+
     } else {
-      // NEC以外のプロトコルまたは解析失敗
-      Serial.println("-> Non-NEC protocol");
+      Serial.println("Pattern length error");
+      startLongBeep();
     }
 
+    learnMode = LEARN_NONE;
     IrReceiver.resume();
+    return;
   }
+
+  // ========== 通常モード：Method A+B（プロトコル照合+RAWフォールバック）==========
+
+  // プロトコル情報を取得
+  uint8_t rxProtocol = IrReceiver.decodedIRData.protocol;
+  uint8_t rxAddress = IrReceiver.decodedIRData.address;
+  uint8_t rxCommand = IrReceiver.decodedIRData.command;
+
+  Serial.print("IR RX Protocol:");
+  Serial.print(rxProtocol);
+  if (rxProtocol != UNKNOWN) {
+    Serial.print(" Addr:0x");
+    Serial.print(rxAddress, HEX);
+    Serial.print(" Cmd:0x");
+    Serial.print(rxCommand, HEX);
+  }
+  Serial.print(" rawLen:");
+  Serial.print(sigLen);
+  Serial.print(" [");
+  for (uint16_t i = 0; i < sigLen && i < 10; i++) {
+    Serial.print(rxBuf[i]);
+    if (i < sigLen - 1 && i < 9) Serial.print(",");
+  }
+  if (sigLen > 10) Serial.print("...");
+  Serial.println("]");
+
+  bool matched = false;
+  PatternType matchedPattern = PATTERN_ON;  // ダミー初期値
+
+  // Method A: プロトコルがNECであれば、address+commandで照合
+  if (rxProtocol == NEC) {
+    PatternProtocolInfo onInfo = loadProtocolInfo(PATTERN_ON);
+    PatternProtocolInfo offInfo = loadProtocolInfo(PATTERN_OFF);
+    PatternProtocolInfo ppInfo = loadProtocolInfo(PATTERN_PLAYPAUSE);
+
+    // ON照合
+    if (onInfo.isValid && rxAddress == onInfo.address && rxCommand == onInfo.command) {
+      Serial.println("-> ON (by protocol)");
+      matched = true;
+      matchedPattern = PATTERN_ON;
+    }
+    // OFF照合
+    else if (offInfo.isValid && rxAddress == offInfo.address && rxCommand == offInfo.command) {
+      Serial.println("-> OFF (by protocol)");
+      matched = true;
+      matchedPattern = PATTERN_OFF;
+    }
+    // PLAYPAUSE照合
+    else if (ppInfo.isValid && rxAddress == ppInfo.address && rxCommand == ppInfo.command) {
+      Serial.println("-> PLAYPAUSE (by protocol)");
+      matched = true;
+      matchedPattern = PATTERN_PLAYPAUSE;
+    }
+  }
+
+  // Method B: プロトコル照合失敗時、またはUNKNOWNの場合はRAW波形照合
+  if (!matched) {
+    if (matchesStoredPattern(PATTERN_ON, rxBuf, sigLen)) {
+      Serial.println("-> ON (by RAW)");
+      matched = true;
+      matchedPattern = PATTERN_ON;
+    } else if (matchesStoredPattern(PATTERN_OFF, rxBuf, sigLen)) {
+      Serial.println("-> OFF (by RAW)");
+      matched = true;
+      matchedPattern = PATTERN_OFF;
+    } else if (matchesStoredPattern(PATTERN_PLAYPAUSE, rxBuf, sigLen)) {
+      Serial.println("-> PLAYPAUSE (by RAW)");
+      matched = true;
+      matchedPattern = PATTERN_PLAYPAUSE;
+    }
+  }
+
+  // マッチング結果を処理
+  if (matched) {
+    switch (matchedPattern) {
+      case PATTERN_ON:
+        beepLong();
+        activateScenario(1);
+        break;
+      case PATTERN_OFF:
+        beepDouble();
+        activateScenario(0);
+        break;
+      case PATTERN_PLAYPAUSE:
+        sendConsumerKey(PLAYPAUSE_KEYCODE);
+        break;
+    }
+  } else {
+    Serial.println("-> UNKNOWN (no match)");
+  }
+
+  IrReceiver.resume();
 }
 
 // タスク実行エンジン
@@ -589,7 +911,13 @@ void executeTask() {
       break;
 
     case CMD_KEY:
-      sendRawHIDKey(cmd.value);
+      sendKeyboardKey(cmd.value);
+      currentTask.currentStep++;
+      currentTask.stepStartTime = millis();
+      break;
+
+    case CMD_CONSUMER:
+      sendConsumerKey(cmd.value);
       currentTask.currentStep++;
       currentTask.stepStartTime = millis();
       break;
@@ -607,6 +935,11 @@ void setup() {
   // IRremote 3.9.0: begin()を使用
   IrReceiver.begin(IR_RECV_PIN, ENABLE_LED_FEEDBACK);
   IrSender.begin(IR_LED_PIN, DISABLE_LED_FEEDBACK);
+
+  // HID-Project初期化
+  Keyboard.begin();
+  Consumer.begin();
+  keyboard_initialized = true;
 
   // EEPROMチェック
   eepromValid = checkEEPROMValid();

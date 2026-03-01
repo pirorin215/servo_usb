@@ -1,1 +1,1 @@
-arduino-cli monitor -p /dev/cu.usbmodem8
+arduino-cli monitor -p /dev/cu.usbmodemHIDEF1
