@@ -29,11 +29,11 @@ const uint16_t PLAYPAUSE_KEYCODE = MEDIA_PLAY_PAUSE;  // Consumer: Play/Pause (H
 const uint16_t MATCH_TOLERANCE_US = 200;   // 絶対誤差[μs]
 const uint8_t  MATCH_TOLERANCE_PCT = 20;    // 相対誤差[%]
 const uint8_t  MATCH_LEN_TOLERANCE = 2;     // パターン長の許容差
-const uint8_t  MATCH_THRESHOLD_PCT = 85;    // 一致とみなす最低一致率[%]
-const uint8_t  STRICT_MATCH_COUNT = 10;    // 最初のN要素は厳密に一致させる
+const uint8_t  MATCH_THRESHOLD_PCT = 90;    // 一致とみなす最低一致率[%]
+const uint8_t  STRICT_MATCH_COUNT = 32;    // 最初のN要素は厳密に一致させる（16ビット分）
 
 // デバッグ出力設定（0:無効, 1:有効）
-#define DEBUG_MODE 0
+#define DEBUG_MODE 1
 
 // キーボード初期化フラグ
 bool keyboard_initialized = false;
@@ -401,12 +401,14 @@ void dumpPattern(PatternType patternType) {
   }
 
   Serial.print("[");
-  for (int i = 0; i < len && i < 30; i++) {
+  for (int i = 0; i < len; i++) {
     Serial.print(pattern[i]);
-    if (i < len - 1 && i < 29) Serial.print(",");
+    if (i < len - 1) Serial.print(",");
   }
-  if (len > 30) Serial.print("...");
   Serial.println("]");
+
+  // バイナリ表現も表示
+  printBinaryPattern(pattern, len);
 }
 
 void resetEEPROMPatterns() {
@@ -456,6 +458,29 @@ void handleSerialCommands() {
   }
 }
 
+// RAWパターンをバイナリ文字列に変換（デバッグ用）
+void printBinaryPattern(const uint16_t* pattern, uint8_t len) {
+  // インデックス0,1はリーダー部（9ms + 4.5ms）
+  // インデックス2以降がデータ部（2要素で1ビット）
+  Serial.print("Binary: ");
+
+  int bitsPrinted = 0;
+  for (uint8_t i = 2; i < len && i < 2 + 64; i += 2) {
+    // LOW期間の長さで0/1を判定（しきい値25）
+    if (i + 1 < len) {
+      uint16_t lowTime = pattern[i + 1];
+      Serial.print(lowTime < 25 ? "0" : "1");
+      bitsPrinted++;
+
+      // 8ビットごとにスペース
+      if (bitsPrinted % 8 == 0 && bitsPrinted < 32) {
+        Serial.print(" ");
+      }
+    }
+  }
+  Serial.println();
+}
+
 // ========== RAW波形照合 ==========
 
 // 1パルスが一致しているか（絶対誤差 OR 相対誤差）
@@ -489,9 +514,9 @@ int calcMatchScore(const uint16_t* stored, uint8_t storedLen,
     bool strictMode = (i < STRICT_MATCH_COUNT && i < (uint8_t)STRICT_MATCH_COUNT && i < storedLen && i < receivedLen);
 
     if (strictMode) {
-      // 厳密モード：完全一致に近い必要がある
+      // 厳密モード：完全一致のみ受け入れる
       uint16_t diff = (stored[i] > received[i]) ? (stored[i] - received[i]) : (received[i] - stored[i]);
-      if (diff <= 2) {  // 2μs以内なら一致とみなす
+      if (diff == 0) {  // 完全一致のみ
         strictMatched++;
         matched++;
       }
@@ -549,9 +574,6 @@ void sendConsumerKey(uint16_t keycode) {
 
 // 赤外線信号送信（3.9.0対応、EEPROMのみ）
 void sendIRSignal(int state) {
-  Serial.print("IR sending:");
-  Serial.print(state == 1 ? "ON" : "OFF");
-
   uint8_t patternLen;
   PatternType ptype = (state == 1) ? PATTERN_ON : PATTERN_OFF;
 
@@ -560,21 +582,7 @@ void sendIRSignal(int state) {
     return;
   }
 
-  Serial.print(" len:");
-  Serial.println(patternLen);
-
-  // パターンをダンプ（最初の20要素）
-  Serial.print("Sending pattern [");
-  for (int i = 0; i < patternLen && i < 20; i++) {
-    Serial.print(sendBuf[i]);
-    if (i < patternLen - 1 && i < 19) Serial.print(",");
-  }
-  if (patternLen > 20) Serial.print("...");
-  Serial.println("]");
-
   IrSender.sendRaw(sendBuf, patternLen, 38);
-  Serial.print("IR sent:");
-  Serial.println(state == 1 ? "ON" : "OFF");
 }
 
 // スイッチからのシナリオ選択
@@ -645,11 +653,19 @@ void handleIRReception() {
   }
 
   // NECリピート信号を無視（rawlenが短すぎる場合はリピート）
+  // ただし学習モードの場合はスキップ（異常な信号も学習するため）
   uint16_t rawLen = IrReceiver.decodedIRData.rawDataPtr->rawlen;
-  if (rawLen < 10) {
+  if (learnMode == LEARN_NONE && rawLen < 10) {
     Serial.print("IR: repeat signal ignored (rawLen=");
     Serial.print(rawLen);
     Serial.println(")");
+    IrReceiver.resume();
+    return;
+  }
+
+  // rawLenが0または異常値の場合、学習モードでなければ無視
+  if (learnMode == LEARN_NONE && rawLen == 0) {
+    Serial.println("IR: no data (rawLen=0)");
     IrReceiver.resume();
     return;
   }
@@ -668,33 +684,62 @@ void handleIRReception() {
   if (learnMode != LEARN_NONE) {
     Serial.print("Learn: rawLen=");
     Serial.println(rawLen);
+    Serial.print("sigLen=");
+    Serial.println(sigLen);
+
+    // プロトコル情報を取得
+    uint8_t rxProtocol = IrReceiver.decodedIRData.protocol;
+    uint8_t rxAddress = IrReceiver.decodedIRData.address;
+    uint8_t rxCommand = IrReceiver.decodedIRData.command;
+
+    // デバッグ：プロトコル情報を常に表示
+    Serial.print("Detected Protocol: ");
+    Serial.print(rxProtocol);
+    if (rxProtocol != UNKNOWN) {
+      Serial.print(" Addr:0x");
+      Serial.print(rxAddress, HEX);
+      Serial.print(" Cmd:0x");
+      Serial.println(rxCommand, HEX);
+    } else {
+      Serial.println(" (UNKNOWN)");
+    }
 
     if (sigLen >= 3 && sigLen <= MAX_PATTERN_LENGTH) {
       for (uint16_t i = 0; i < sigLen; i++) learnedPattern[i] = rxBuf[i];
       learnedPatternLength = (uint8_t)sigLen;
 
       Serial.print("Pattern [");
-      for (int i = 0; i < learnedPatternLength && i < 20; i++) {
+      for (int i = 0; i < learnedPatternLength; i++) {
         Serial.print(learnedPattern[i]);
-        if (i < learnedPatternLength - 1 && i < 19) Serial.print(",");
+        if (i < learnedPatternLength - 1) Serial.print(",");
       }
-      if (learnedPatternLength > 20) Serial.print("...");
       Serial.println("]");
 
-      // プロトコル情報を取得
-      uint8_t protocol = IrReceiver.decodedIRData.protocol;
-      uint8_t address = IrReceiver.decodedIRData.address;
-      uint8_t command = IrReceiver.decodedIRData.command;
-
       Serial.print("Protocol: ");
-      Serial.print(protocol);
-      if (protocol != UNKNOWN) {
+      Serial.print(rxProtocol);
+      if (rxProtocol != UNKNOWN) {
         Serial.print(" Addr:0x");
-        Serial.print(address, HEX);
+        Serial.print(rxAddress, HEX);
         Serial.print(" Cmd:0x");
-        Serial.println(command, HEX);
+        Serial.println(rxCommand, HEX);
       } else {
-        Serial.println(" (RAW only)");
+        Serial.println(" (UNKNOWN)");
+      }
+
+      // NECプロトコル警告
+      if (rxProtocol != NEC) {
+        Serial.println("");
+        Serial.println("==================================");
+        Serial.println("WARNING: This device is designed for NEC protocol only!");
+        Serial.println("Non-NEC protocols may not work properly.");
+        Serial.println("Recommended: Use a NEC remote for learning.");
+        Serial.println("==================================");
+        Serial.println("");
+        startLongBeep();
+        // 学習を中止
+        learnMode = LEARN_NONE;
+        IrReceiver.resume();
+        return;
       }
 
       PatternType ptype;
@@ -705,7 +750,7 @@ void handleIRReception() {
       EEPROMAddresses addrs = getEEPROMAddresses(ptype);
 
       // プロトコル情報付きで保存
-      savePatternToEEPROM(ptype, learnedPattern, learnedPatternLength, protocol, address, command);
+      savePatternToEEPROM(ptype, learnedPattern, learnedPatternLength, rxProtocol, rxAddress, rxCommand);
       startDoubleBeep();
       Serial.print("Learned ");
       Serial.print(addrs.name);
@@ -714,7 +759,11 @@ void handleIRReception() {
       Serial.println(")");
 
     } else {
-      Serial.println("Pattern length error");
+      Serial.print("Pattern length error: sigLen=");
+      Serial.print(sigLen);
+      Serial.print(" (expected 3-");
+      Serial.print(MAX_PATTERN_LENGTH);
+      Serial.println(")");
       startLongBeep();
     }
 
@@ -753,28 +802,43 @@ void handleIRReception() {
   bool matched = false;
   PatternType matchedPattern = PATTERN_ON;  // ダミー初期値
 
-  // Method A: プロトコルがNECであれば、address+commandで照合
-  if (rxProtocol == NEC) {
-    // 遅延ロード：必要な時だけプロトコル情報を読み込む
+  // 未知のアドレスチェック（学習済みアドレス以外は無視）
+  // ライブラリがアドレスを提供している場合のみチェック
+  if (rxAddress != 0) {
+    PatternProtocolInfo onInfo = loadProtocolInfo(PATTERN_ON);
+    PatternProtocolInfo offInfo = loadProtocolInfo(PATTERN_OFF);
+    PatternProtocolInfo ppInfo = loadProtocolInfo(PATTERN_PLAYPAUSE);
+
+    bool onAddrMatch = onInfo.isValid && rxAddress == onInfo.address;
+    bool offAddrMatch = offInfo.isValid && rxAddress == offInfo.address;
+    bool ppAddrMatch = ppInfo.isValid && rxAddress == ppInfo.address;
+
+    if (!onAddrMatch && !offAddrMatch && !ppAddrMatch) {
+      // 学習済みアドレスと完全に一致しない場合は無視
+      Serial.print("Unknown address: 0x");
+      Serial.println(rxAddress, HEX);
+      IrReceiver.resume();
+      return;
+    }
+  }
+
+  // Method A: プロトコル照合（高速・高精度）
+  if (rxAddress != 0 && rxCommand != 0) {
     PatternProtocolInfo onInfo = loadProtocolInfo(PATTERN_ON);
     if (onInfo.isValid && rxAddress == onInfo.address && rxCommand == onInfo.command) {
-      Serial.println("-> ON (by protocol)");
+      Serial.println("-> ON");
       matched = true;
       matchedPattern = PATTERN_ON;
-    }
-    // OFF照合（ONが失敗した場合のみロード）
-    else {
+    } else {
       PatternProtocolInfo offInfo = loadProtocolInfo(PATTERN_OFF);
       if (offInfo.isValid && rxAddress == offInfo.address && rxCommand == offInfo.command) {
-        Serial.println("-> OFF (by protocol)");
+        Serial.println("-> OFF");
         matched = true;
         matchedPattern = PATTERN_OFF;
-      }
-      // PLAYPAUSE照合（OFFが失敗した場合のみロード）
-      else {
+      } else {
         PatternProtocolInfo ppInfo = loadProtocolInfo(PATTERN_PLAYPAUSE);
         if (ppInfo.isValid && rxAddress == ppInfo.address && rxCommand == ppInfo.command) {
-          Serial.println("-> PLAYPAUSE (by protocol)");
+          Serial.println("-> PLAYPAUSE");
           matched = true;
           matchedPattern = PATTERN_PLAYPAUSE;
         }
@@ -782,9 +846,13 @@ void handleIRReception() {
     }
   }
 
-  // Method B: プロトコル照合失敗時、またはUNKNOWNの場合はRAW波形照合
+  // Method B: プロトコル照合失敗時のみRAW波形照合
   if (!matched) {
-    if (matchesStoredPattern(PATTERN_ON, rxBuf, sigLen)) {
+    if (matchesStoredPattern(PATTERN_PLAYPAUSE, rxBuf, sigLen)) {
+      Serial.println("-> PLAYPAUSE (by RAW)");
+      matched = true;
+      matchedPattern = PATTERN_PLAYPAUSE;
+    } else if (matchesStoredPattern(PATTERN_ON, rxBuf, sigLen)) {
       Serial.println("-> ON (by RAW)");
       matched = true;
       matchedPattern = PATTERN_ON;
@@ -792,15 +860,22 @@ void handleIRReception() {
       Serial.println("-> OFF (by RAW)");
       matched = true;
       matchedPattern = PATTERN_OFF;
-    } else if (matchesStoredPattern(PATTERN_PLAYPAUSE, rxBuf, sigLen)) {
-      Serial.println("-> PLAYPAUSE (by RAW)");
-      matched = true;
-      matchedPattern = PATTERN_PLAYPAUSE;
     }
   }
 
   // マッチング結果を処理
   if (matched) {
+    // 共通：受信パターンをダンプ
+    Serial.print("Received pattern [");
+    for (uint16_t i = 0; i < sigLen; i++) {
+      Serial.print(rxBuf[i]);
+      if (i < sigLen - 1) Serial.print(",");
+    }
+    Serial.println("]");
+
+    // バイナリ表現も表示
+    printBinaryPattern(rxBuf, sigLen);
+
     switch (matchedPattern) {
       case PATTERN_ON:
         beepLong();
@@ -812,7 +887,9 @@ void handleIRReception() {
         break;
       case PATTERN_PLAYPAUSE:
         beepShort();  // ピッ（短い音）
+        Serial.println("Act:PLAYPAUSE");
         sendConsumerKey(PLAYPAUSE_KEYCODE);
+        Serial.println("Done");
         break;
     }
   } else {
