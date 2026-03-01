@@ -32,6 +32,9 @@ const uint8_t  MATCH_LEN_TOLERANCE = 2;     // パターン長の許容差
 const uint8_t  MATCH_THRESHOLD_PCT = 85;    // 一致とみなす最低一致率[%]
 const uint8_t  STRICT_MATCH_COUNT = 10;    // 最初のN要素は厳密に一致させる
 
+// デバッグ出力設定（0:無効, 1:有効）
+#define DEBUG_MODE 0
+
 // キーボード初期化フラグ
 bool keyboard_initialized = false;
 
@@ -124,6 +127,16 @@ struct PatternProtocolInfo {
   uint8_t protocol;
   uint8_t address;
   uint8_t command;
+};
+
+// EEPROMアドレス構造体（重複排除のため）
+struct EEPROMAddresses {
+  int lenAddr;
+  int dataAddr;
+  int protocolAddr;
+  int addrAddr;
+  int cmdAddr;
+  const char* name;
 };
 
 uint16_t learnedPattern[70];
@@ -248,6 +261,38 @@ void beepDouble() {
 
 // ========== EEPROM操作関数 ==========
 
+// PatternTypeに対応するEEPROMアドレスを取得
+EEPROMAddresses getEEPROMAddresses(PatternType patternType) {
+  EEPROMAddresses addrs;
+  switch (patternType) {
+    case PATTERN_ON:
+      addrs.lenAddr = EEPROM_ON_LEN_ADDR;
+      addrs.dataAddr = EEPROM_ON_DATA_ADDR;
+      addrs.protocolAddr = EEPROM_ON_PROTOCOL_ADDR;
+      addrs.addrAddr = EEPROM_ON_ADDR_ADDR;
+      addrs.cmdAddr = EEPROM_ON_CMD_ADDR;
+      addrs.name = "ON";
+      break;
+    case PATTERN_OFF:
+      addrs.lenAddr = EEPROM_OFF_LEN_ADDR;
+      addrs.dataAddr = EEPROM_OFF_DATA_ADDR;
+      addrs.protocolAddr = EEPROM_OFF_PROTOCOL_ADDR;
+      addrs.addrAddr = EEPROM_OFF_ADDR_ADDR;
+      addrs.cmdAddr = EEPROM_OFF_CMD_ADDR;
+      addrs.name = "OFF";
+      break;
+    case PATTERN_PLAYPAUSE:
+      addrs.lenAddr = EEPROM_PLAYPAUSE_LEN_ADDR;
+      addrs.dataAddr = EEPROM_PLAYPAUSE_DATA_ADDR;
+      addrs.protocolAddr = EEPROM_PLAYPAUSE_PROTOCOL_ADDR;
+      addrs.addrAddr = EEPROM_PLAYPAUSE_ADDR_ADDR;
+      addrs.cmdAddr = EEPROM_PLAYPAUSE_CMD_ADDR;
+      addrs.name = "PLAYPAUSE";
+      break;
+  }
+  return addrs;
+}
+
 bool checkEEPROMValid() {
   char magic[4];
   for (int i = 0; i < 4; i++) {
@@ -266,53 +311,25 @@ void writeMagicNumber() {
 
 void savePatternToEEPROM(PatternType patternType, const uint16_t* pattern, uint8_t len,
                            uint8_t protocol, uint8_t address, uint8_t command) {
-  int lenAddr, dataAddr, protocolAddr, addrAddr, cmdAddr;
-  const char* name;
-
-  switch (patternType) {
-    case PATTERN_ON:
-      lenAddr = EEPROM_ON_LEN_ADDR;
-      dataAddr = EEPROM_ON_DATA_ADDR;
-      protocolAddr = EEPROM_ON_PROTOCOL_ADDR;
-      addrAddr = EEPROM_ON_ADDR_ADDR;
-      cmdAddr = EEPROM_ON_CMD_ADDR;
-      name = "ON";
-      break;
-    case PATTERN_OFF:
-      lenAddr = EEPROM_OFF_LEN_ADDR;
-      dataAddr = EEPROM_OFF_DATA_ADDR;
-      protocolAddr = EEPROM_OFF_PROTOCOL_ADDR;
-      addrAddr = EEPROM_OFF_ADDR_ADDR;
-      cmdAddr = EEPROM_OFF_CMD_ADDR;
-      name = "OFF";
-      break;
-    case PATTERN_PLAYPAUSE:
-      lenAddr = EEPROM_PLAYPAUSE_LEN_ADDR;
-      dataAddr = EEPROM_PLAYPAUSE_DATA_ADDR;
-      protocolAddr = EEPROM_PLAYPAUSE_PROTOCOL_ADDR;
-      addrAddr = EEPROM_PLAYPAUSE_ADDR_ADDR;
-      cmdAddr = EEPROM_PLAYPAUSE_CMD_ADDR;
-      name = "PLAYPAUSE";
-      break;
-  }
+  EEPROMAddresses addrs = getEEPROMAddresses(patternType);
 
   // RAWデータを保存
-  EEPROM.update(lenAddr, len);
+  EEPROM.update(addrs.lenAddr, len);
   for (int i = 0; i < len && i < MAX_PATTERN_LENGTH; i++) {
-    EEPROM.update(dataAddr + (i * 2), lowByte(pattern[i]));
-    EEPROM.update(dataAddr + (i * 2) + 1, highByte(pattern[i]));
+    EEPROM.update(addrs.dataAddr + (i * 2), lowByte(pattern[i]));
+    EEPROM.update(addrs.dataAddr + (i * 2) + 1, highByte(pattern[i]));
   }
 
   // プロトコル情報を保存
-  EEPROM.update(protocolAddr, protocol);
-  EEPROM.update(addrAddr, address);
-  EEPROM.update(cmdAddr, command);
+  EEPROM.update(addrs.protocolAddr, protocol);
+  EEPROM.update(addrs.addrAddr, address);
+  EEPROM.update(addrs.cmdAddr, command);
 
   writeMagicNumber();
   eepromValid = true;
 
   Serial.print("Saved ");
-  Serial.print(name);
+  Serial.print(addrs.name);
   Serial.print(" pattern (len=");
   Serial.print(len);
   Serial.print(") addr=0x");
@@ -324,28 +341,13 @@ void savePatternToEEPROM(PatternType patternType, const uint16_t* pattern, uint8
 bool loadPatternFromEEPROM(PatternType patternType, uint16_t* pattern, uint8_t* len) {
   if (!eepromValid) return false;
 
-  int lenAddr, dataAddr;
+  EEPROMAddresses addrs = getEEPROMAddresses(patternType);
 
-  switch (patternType) {
-    case PATTERN_ON:
-      lenAddr = EEPROM_ON_LEN_ADDR;
-      dataAddr = EEPROM_ON_DATA_ADDR;
-      break;
-    case PATTERN_OFF:
-      lenAddr = EEPROM_OFF_LEN_ADDR;
-      dataAddr = EEPROM_OFF_DATA_ADDR;
-      break;
-    case PATTERN_PLAYPAUSE:
-      lenAddr = EEPROM_PLAYPAUSE_LEN_ADDR;
-      dataAddr = EEPROM_PLAYPAUSE_DATA_ADDR;
-      break;
-  }
-
-  *len = EEPROM.read(lenAddr);
+  *len = EEPROM.read(addrs.lenAddr);
   if (*len == 0 || *len > MAX_PATTERN_LENGTH) return false;
 
   for (int i = 0; i < *len; i++) {
-    pattern[i] = word(EEPROM.read(dataAddr + (i * 2) + 1), EEPROM.read(dataAddr + (i * 2)));
+    pattern[i] = word(EEPROM.read(addrs.dataAddr + (i * 2) + 1), EEPROM.read(addrs.dataAddr + (i * 2)));
   }
 
   return true;
@@ -353,29 +355,11 @@ bool loadPatternFromEEPROM(PatternType patternType, uint16_t* pattern, uint8_t* 
 
 PatternProtocolInfo loadProtocolInfo(PatternType patternType) {
   PatternProtocolInfo info = {false, 0, 0, 0};
-  int protocolAddr, addrAddr, cmdAddr;
+  EEPROMAddresses addrs = getEEPROMAddresses(patternType);
 
-  switch (patternType) {
-    case PATTERN_ON:
-      protocolAddr = EEPROM_ON_PROTOCOL_ADDR;
-      addrAddr = EEPROM_ON_ADDR_ADDR;
-      cmdAddr = EEPROM_ON_CMD_ADDR;
-      break;
-    case PATTERN_OFF:
-      protocolAddr = EEPROM_OFF_PROTOCOL_ADDR;
-      addrAddr = EEPROM_OFF_ADDR_ADDR;
-      cmdAddr = EEPROM_OFF_CMD_ADDR;
-      break;
-    case PATTERN_PLAYPAUSE:
-      protocolAddr = EEPROM_PLAYPAUSE_PROTOCOL_ADDR;
-      addrAddr = EEPROM_PLAYPAUSE_ADDR_ADDR;
-      cmdAddr = EEPROM_PLAYPAUSE_CMD_ADDR;
-      break;
-  }
-
-  info.protocol = EEPROM.read(protocolAddr);
-  info.address = EEPROM.read(addrAddr);
-  info.command = EEPROM.read(cmdAddr);
+  info.protocol = EEPROM.read(addrs.protocolAddr);
+  info.address = EEPROM.read(addrs.addrAddr);
+  info.command = EEPROM.read(addrs.cmdAddr);
 
   // プロトコルが0以外なら有効とみなす
   info.isValid = (info.protocol != 0);
@@ -386,6 +370,43 @@ PatternProtocolInfo loadProtocolInfo(PatternType patternType) {
 bool hasProtocolInfo(PatternType patternType) {
   PatternProtocolInfo info = loadProtocolInfo(patternType);
   return info.isValid;
+}
+
+// パターンダンプ用ヘルパー関数
+void dumpPattern(PatternType patternType) {
+  uint8_t len;
+  uint16_t pattern[MAX_PATTERN_LENGTH];
+  EEPROMAddresses addrs = getEEPROMAddresses(patternType);
+
+  if (!loadPatternFromEEPROM(patternType, pattern, &len)) {
+    Serial.print(addrs.name);
+    Serial.println(" Pattern: NOT FOUND");
+    return;
+  }
+
+  Serial.print(addrs.name);
+  Serial.print(" Pattern (len=");
+  Serial.print(len);
+
+  PatternProtocolInfo proto = loadProtocolInfo(patternType);
+  if (proto.isValid) {
+    Serial.print(") Protocol:");
+    Serial.print(proto.protocol);
+    Serial.print(" Addr:0x");
+    Serial.print(proto.address, HEX);
+    Serial.print(" Cmd:0x");
+    Serial.println(proto.command, HEX);
+  } else {
+    Serial.println(") - RAW only");
+  }
+
+  Serial.print("[");
+  for (int i = 0; i < len && i < 30; i++) {
+    Serial.print(pattern[i]);
+    if (i < len - 1 && i < 29) Serial.print(",");
+  }
+  if (len > 30) Serial.print("...");
+  Serial.println("]");
 }
 
 void resetEEPROMPatterns() {
@@ -426,87 +447,9 @@ void handleSerialCommands() {
     } else if (cmd == "DUMP_PATTERNS") {
       Serial.println("=== EEPROM DUMP ===");
 
-      uint8_t len;
-      uint16_t pattern[MAX_PATTERN_LENGTH];
-      PatternProtocolInfo proto;
-
-      // ONパターン
-      if (loadPatternFromEEPROM(PATTERN_ON, pattern, &len)) {
-        Serial.print("ON Pattern (len=");
-        Serial.print(len);
-        proto = loadProtocolInfo(PATTERN_ON);
-        if (proto.isValid) {
-          Serial.print(") Protocol:");
-          Serial.print(proto.protocol);
-          Serial.print(" Addr:0x");
-          Serial.print(proto.address, HEX);
-          Serial.print(" Cmd:0x");
-          Serial.println(proto.command, HEX);
-        } else {
-          Serial.println(") - RAW only");
-        }
-        Serial.print("[");
-        for (int i = 0; i < len && i < 30; i++) {
-          Serial.print(pattern[i]);
-          if (i < len - 1 && i < 29) Serial.print(",");
-        }
-        if (len > 30) Serial.print("...");
-        Serial.println("]");
-      } else {
-        Serial.println("ON Pattern: NOT FOUND");
-      }
-
-      // OFFパターン
-      if (loadPatternFromEEPROM(PATTERN_OFF, pattern, &len)) {
-        Serial.print("OFF Pattern (len=");
-        Serial.print(len);
-        proto = loadProtocolInfo(PATTERN_OFF);
-        if (proto.isValid) {
-          Serial.print(") Protocol:");
-          Serial.print(proto.protocol);
-          Serial.print(" Addr:0x");
-          Serial.print(proto.address, HEX);
-          Serial.print(" Cmd:0x");
-          Serial.println(proto.command, HEX);
-        } else {
-          Serial.println(") - RAW only");
-        }
-        Serial.print("[");
-        for (int i = 0; i < len && i < 30; i++) {
-          Serial.print(pattern[i]);
-          if (i < len - 1 && i < 29) Serial.print(",");
-        }
-        if (len > 30) Serial.print("...");
-        Serial.println("]");
-      } else {
-        Serial.println("OFF Pattern: NOT FOUND");
-      }
-
-      // PLAYPAUSEパターン
-      if (loadPatternFromEEPROM(PATTERN_PLAYPAUSE, pattern, &len)) {
-        Serial.print("PLAYPAUSE Pattern (len=");
-        Serial.print(len);
-        proto = loadProtocolInfo(PATTERN_PLAYPAUSE);
-        if (proto.isValid) {
-          Serial.print(") Protocol:");
-          Serial.print(proto.protocol);
-          Serial.print(" Addr:0x");
-          Serial.print(proto.address, HEX);
-          Serial.print(" Cmd:0x");
-          Serial.println(proto.command, HEX);
-        } else {
-          Serial.println(") - RAW only");
-        }
-        Serial.print("[");
-        for (int i = 0; i < len && i < 30; i++) {
-          Serial.print(pattern[i]);
-          if (i < len - 1 && i < 29) Serial.print(",");
-        }
-        if (len > 30) Serial.print("...");
-        Serial.println("]");
-      } else {
-        Serial.println("PLAYPAUSE Pattern: NOT FOUND");
-      }
+      dumpPattern(PATTERN_ON);
+      dumpPattern(PATTERN_OFF);
+      dumpPattern(PATTERN_PLAYPAUSE);
 
       Serial.println("==================");
     }
@@ -558,8 +501,10 @@ int calcMatchScore(const uint16_t* stored, uint8_t storedLen,
     }
   }
 
+#if DEBUG_MODE
   // デバッグ：厳密モードでの一致数を表示
   Serial.print("  StrictMatch: "); Serial.print(strictMatched); Serial.print("/"); Serial.println(STRICT_MATCH_COUNT);
+#endif
 
   return (int)matched * 100 / compareLen;
 }
@@ -574,15 +519,12 @@ bool matchesStoredPattern(PatternType patternType,
 
   int score = calcMatchScore(stored, storedLen, received, receivedLen);
 
+#if DEBUG_MODE
   // デバッグ出力
-  const char* name;
-  switch (patternType) {
-    case PATTERN_ON:        name = "ON";        break;
-    case PATTERN_OFF:       name = "OFF";       break;
-    case PATTERN_PLAYPAUSE: name = "PLAYPAUSE"; break;
-  }
-  Serial.print("  Match "); Serial.print(name);
+  EEPROMAddresses addrs = getEEPROMAddresses(patternType);
+  Serial.print("  Match "); Serial.print(addrs.name);
   Serial.print(": "); Serial.print(score); Serial.println("%");
+#endif
 
   return (score >= MATCH_THRESHOLD_PCT);
 }
@@ -756,16 +698,17 @@ void handleIRReception() {
       }
 
       PatternType ptype;
-      const char* pname;
-      if      (learnMode == LEARN_ON)        { ptype = PATTERN_ON;        pname = "ON"; }
-      else if (learnMode == LEARN_OFF)       { ptype = PATTERN_OFF;       pname = "OFF"; }
-      else                                   { ptype = PATTERN_PLAYPAUSE; pname = "PLAYPAUSE"; }
+      if      (learnMode == LEARN_ON)        ptype = PATTERN_ON;
+      else if (learnMode == LEARN_OFF)       ptype = PATTERN_OFF;
+      else                                   ptype = PATTERN_PLAYPAUSE;
+
+      EEPROMAddresses addrs = getEEPROMAddresses(ptype);
 
       // プロトコル情報付きで保存
       savePatternToEEPROM(ptype, learnedPattern, learnedPatternLength, protocol, address, command);
       startDoubleBeep();
       Serial.print("Learned ");
-      Serial.print(pname);
+      Serial.print(addrs.name);
       Serial.print(" pattern (len=");
       Serial.print(learnedPatternLength);
       Serial.println(")");
@@ -787,6 +730,7 @@ void handleIRReception() {
   uint8_t rxAddress = IrReceiver.decodedIRData.address;
   uint8_t rxCommand = IrReceiver.decodedIRData.command;
 
+#if DEBUG_MODE
   Serial.print("IR RX Protocol:");
   Serial.print(rxProtocol);
   if (rxProtocol != UNKNOWN) {
@@ -804,33 +748,37 @@ void handleIRReception() {
   }
   if (sigLen > 10) Serial.print("...");
   Serial.println("]");
+#endif
 
   bool matched = false;
   PatternType matchedPattern = PATTERN_ON;  // ダミー初期値
 
   // Method A: プロトコルがNECであれば、address+commandで照合
   if (rxProtocol == NEC) {
+    // 遅延ロード：必要な時だけプロトコル情報を読み込む
     PatternProtocolInfo onInfo = loadProtocolInfo(PATTERN_ON);
-    PatternProtocolInfo offInfo = loadProtocolInfo(PATTERN_OFF);
-    PatternProtocolInfo ppInfo = loadProtocolInfo(PATTERN_PLAYPAUSE);
-
-    // ON照合
     if (onInfo.isValid && rxAddress == onInfo.address && rxCommand == onInfo.command) {
       Serial.println("-> ON (by protocol)");
       matched = true;
       matchedPattern = PATTERN_ON;
     }
-    // OFF照合
-    else if (offInfo.isValid && rxAddress == offInfo.address && rxCommand == offInfo.command) {
-      Serial.println("-> OFF (by protocol)");
-      matched = true;
-      matchedPattern = PATTERN_OFF;
-    }
-    // PLAYPAUSE照合
-    else if (ppInfo.isValid && rxAddress == ppInfo.address && rxCommand == ppInfo.command) {
-      Serial.println("-> PLAYPAUSE (by protocol)");
-      matched = true;
-      matchedPattern = PATTERN_PLAYPAUSE;
+    // OFF照合（ONが失敗した場合のみロード）
+    else {
+      PatternProtocolInfo offInfo = loadProtocolInfo(PATTERN_OFF);
+      if (offInfo.isValid && rxAddress == offInfo.address && rxCommand == offInfo.command) {
+        Serial.println("-> OFF (by protocol)");
+        matched = true;
+        matchedPattern = PATTERN_OFF;
+      }
+      // PLAYPAUSE照合（OFFが失敗した場合のみロード）
+      else {
+        PatternProtocolInfo ppInfo = loadProtocolInfo(PATTERN_PLAYPAUSE);
+        if (ppInfo.isValid && rxAddress == ppInfo.address && rxCommand == ppInfo.command) {
+          Serial.println("-> PLAYPAUSE (by protocol)");
+          matched = true;
+          matchedPattern = PATTERN_PLAYPAUSE;
+        }
+      }
     }
   }
 
@@ -863,6 +811,7 @@ void handleIRReception() {
         activateScenario(0);
         break;
       case PATTERN_PLAYPAUSE:
+        beepShort();  // ピッ（短い音）
         sendConsumerKey(PLAYPAUSE_KEYCODE);
         break;
     }

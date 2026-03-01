@@ -38,11 +38,17 @@ fi
 
 MODE=$(echo "$1" | tr '[:upper:]' '[:lower:]')
 
-if [ "$MODE" != "on" ] && [ "$MODE" != "off" ] && [ "$MODE" != "playpause" ] && [ "$MODE" != "dump" ] && [ "$MODE" != "reset" ]; then
-    echo -e "${RED}エラー: 'on', 'off', 'playpause', 'dump', または 'reset' を指定してください${NC}"
-    echo "使い方: $0 <on|off|playpause|dump|reset> [シリアルポート]"
-    exit 1
-fi
+# モードの妥当性チェック（case文で重複排除）
+case "$MODE" in
+    on|off|playpause|dump|reset)
+        # 有効なモード
+        ;;
+    *)
+        echo -e "${RED}エラー: 'on', 'off', 'playpause', 'dump', または 'reset' を指定してください${NC}"
+        echo "使い方: $0 <on|off|playpause|dump|reset> [シリアルポート]"
+        exit 1
+        ;;
+esac
 
 # ポート指定の確認
 if [ $# -ge 2 ]; then
@@ -125,15 +131,22 @@ if [ "$MODE" = "dump" ]; then
     echo -e "${YELLOW}=== EEPROM ダンプ ===${NC}"
     echo ""
 
-    # 出力監視開始
     monitor_output
-
-    # 少し待ってからコマンド送信
     sleep 0.5
     echo "DUMP_PATTERNS" > "$SERIAL_PORT"
 
-    # 出力が完了するのを待つ
-    sleep 4
+    # "==================" （ダンプ終端）が来たら即終了、最大5秒待つ
+    WAIT_COUNT=0
+    while [ $WAIT_COUNT -lt 50 ]; do
+        if grep -q "==================" "$TMPLOG" 2>/dev/null; then
+            sleep 0.2  # 最終行が画面に出るのを待つ
+            cleanup
+            echo ""
+            exit 0
+        fi
+        sleep 0.1
+        WAIT_COUNT=$((WAIT_COUNT + 1))
+    done
 
     cleanup
     echo ""
@@ -146,32 +159,28 @@ if [ "$MODE" = "reset" ]; then
     echo -e "${YELLOW}=== EEPROM リセット ===${NC}"
     echo ""
 
-    # クリーンアップ関数
-    cleanup_reset() {
-        pkill -f "cat $SERIAL_PORT" 2>/dev/null || true
-    }
-
-    trap cleanup_reset EXIT
-
-    # 出力監視開始
     monitor_output
-
-    # 少し待ってからコマンド送信
     sleep 0.5
     echo "RESET_PATTERNS" > "$SERIAL_PORT"
 
-    # 応答を待つ
-    sleep 1
+    # "OK RESET" が来たら即終了、最大5秒待つ
+    WAIT_COUNT=0
+    while [ $WAIT_COUNT -lt 50 ]; do
+        if grep -q "OK RESET" "$TMPLOG" 2>/dev/null; then
+            echo -e "${GREEN}✓ EEPROMがリセットされました${NC}"
+            echo ""
+            echo "すべてのパターンがクリアされました。再度学習してください。"
+            echo ""
+            cleanup
+            exit 0
+        fi
+        sleep 0.1
+        WAIT_COUNT=$((WAIT_COUNT + 1))
+    done
 
-    # 出力を表示
-    timeout 2 cat "$SERIAL_PORT" 2>/dev/null || true
-
-    cleanup_reset
-    echo -e "${GREEN}✓ EEPROMがリセットされました${NC}"
-    echo ""
-    echo "すべてのパターンがクリアされました。再度学習してください。"
-    echo ""
-    exit 0
+    echo -e "${RED}✗ リセット失敗（タイムアウト）${NC}"
+    cleanup
+    exit 1
 fi
 
 # メイン処理
