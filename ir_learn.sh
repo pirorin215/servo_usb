@@ -1,0 +1,198 @@
+#!/bin/bash
+
+# ir_learn.sh - Arduino 赤外線学習シェルスクリプト
+# 使い方: ./ir_learn.sh on              (ON信号を学習)
+#         ./ir_learn.sh off             (OFF信号を学習)
+#         ./ir_learn.sh on /dev/cu.xxx  (シリアルポートを指定)
+
+set -e
+
+# 色設定
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# ========== 設定 ==========
+# ここに使用するシリアルポートを固定指定できます
+# SERIAL_PORT="/dev/cu.usbmodem123456781"
+
+# ========== 引数処理 ==========
+MODE=""
+PORT_SPECIFIED="/dev/cu.usbmodem8"
+
+if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    echo "使い方: $0 <on|off|dump> [シリアルポート]"
+    echo ""
+    echo "例:"
+    echo "  $0 on                           # ON信号を学習（自動検出）"
+    echo "  $0 off                          # OFF信号を学習（自動検出）"
+    echo "  $0 dump                         # EEPROM内容をダンプ"
+    echo "  $0 on /dev/cu.usbmodem123456   # ポートを指定"
+    echo ""
+    echo "シリアルポートを固定するには、スクリプト内の SERIAL_PORT 変数を編集してください"
+    exit 0
+fi
+
+MODE=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+
+if [ "$MODE" != "on" ] && [ "$MODE" != "off" ] && [ "$MODE" != "dump" ]; then
+    echo -e "${RED}エラー: 'on', 'off', または 'dump' を指定してください${NC}"
+    echo "使い方: $0 <on|off|dump> [シリアルポート]"
+    exit 1
+fi
+
+# ポート指定の確認
+if [ $# -ge 2 ]; then
+    SERIAL_PORT="$2"
+    PORT_SPECIFIED="yes"
+fi
+
+# ========== シリアルポートの決定 ==========
+if [ -z "$SERIAL_PORT" ]; then
+    # 自動検出
+    for port in /dev/cu.usbmodem* /dev/cu.usbserial*; do
+        if [ -e "$port" ]; then
+            SERIAL_PORT="$port"
+            break
+        fi
+    done
+fi
+
+if [ -z "$SERIAL_PORT" ]; then
+    echo -e "${RED}エラー: シリアルポートが見つかりません${NC}"
+    echo ""
+    echo "以下のいずれかの方法で指定してください:"
+    echo "  1. スクリプト内の SERIAL_PORT 変数を編集"
+    echo "  2. 引数で指定: $0 $1 /dev/cu.usbmodemXXXXXX"
+    echo ""
+    echo "現在接続されているデバイス:"
+    ls -1 /dev/cu.* 2>/dev/null || echo "  (デバイスが見つかりません)"
+    exit 1
+fi
+
+if [ ! -e "$SERIAL_PORT" ]; then
+    echo -e "${RED}エラー: 指定されたシリアルポートが存在しません: $SERIAL_PORT${NC}"
+    echo ""
+    echo "利用可能なポート:"
+    ls -1 /dev/cu.* 2>/dev/null || echo "  (デバイスが見つかりません)"
+    exit 1
+fi
+
+echo -e "${GREEN}シリアルポート: $SERIAL_PORT${NC}"
+
+# スクリプトのディレクトリに移動
+cd "$(dirname "$0")"
+
+# シリアルポート設定（9600ボー、8ビット、パリティなし、1ストップビット）
+stty -f "$SERIAL_PORT" 9600 cs8 -cstopb -parenb 2>/dev/null || true
+
+# コマンド送信関数
+send_command() {
+    echo -n "$1" > "$SERIAL_PORT"
+    sleep 0.1
+}
+
+# バックグラウンドでArduino出力を監視
+monitor_output() {
+    # 既存のcatプロセスがあれば終了
+    pkill -f "cat $SERIAL_PORT" 2>/dev/null || true
+    sleep 0.2
+
+    # 出力監視開始
+    cat "$SERIAL_PORT" 2>/dev/null &
+    CAT_PID=$!
+}
+
+# クリーンアップ関数
+cleanup() {
+    if [ -n "$CAT_PID" ]; then
+        kill "$CAT_PID" 2>/dev/null || true
+    fi
+    pkill -f "cat $SERIAL_PORT" 2>/dev/null || true
+}
+
+trap cleanup EXIT
+
+# ダンプモードの場合
+if [ "$MODE" = "dump" ]; then
+    echo ""
+    echo -e "${YELLOW}=== EEPROM ダンプ ===${NC}"
+    echo ""
+
+    # 出力監視開始
+    monitor_output
+
+    # 少し待ってからコマンド送信
+    sleep 0.5
+    echo "DUMP_PATTERNS" > "$SERIAL_PORT"
+
+    # 出力が完了するのを待つ
+    sleep 4
+
+    cleanup
+    echo ""
+    exit 0
+fi
+
+# メイン処理
+if [ "$MODE" = "on" ]; then
+    COMMAND="LEARN_ON"
+    SIGNAL_NAME="ON信号"
+else
+    COMMAND="LEARN_OFF"
+    SIGNAL_NAME="OFF信号"
+fi
+
+echo ""
+echo -e "${YELLOW}=== 赤外線学習モード ===${NC}"
+echo "学習モード: $SIGNAL_NAME"
+echo ""
+
+# 出力監視開始
+monitor_output
+
+# 学習コマンド送信
+echo "Arduinoに学習コマンドを送信中..."
+send_command "$COMMAND"
+
+# Arduinoからの応答を待つ
+sleep 0.5
+echo ""
+echo -e "${GREEN}Arduinoが準備完了しました${NC}"
+echo -e "${YELLOW}スマートリモコンの${SIGNAL_NAME}をArduinoに向けて送信してください${NC}"
+echo ""
+echo "待機中..."
+
+# 学習完了を待つ（「Learned」または「Pattern length error」を検出）
+WAIT_COUNT=0
+MAX_WAIT=10
+
+while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+    if timeout 0.5 cat "$SERIAL_PORT" 2>/dev/null | grep -q "Learned"; then
+        echo ""
+        echo -e "${GREEN}✓ 学習成功！${NC}"
+        sleep 0.5
+        cleanup
+        exit 0
+    fi
+
+    if timeout 0.5 cat "$SERIAL_PORT" 2>/dev/null | grep -q "Pattern length error\|No RAW data"; then
+        echo ""
+        echo -e "${RED}✗ 学習失敗${NC}"
+        echo "もう一度お試しください"
+        sleep 0.5
+        cleanup
+        exit 1
+    fi
+
+    sleep 1
+    WAIT_COUNT=$((WAIT_COUNT + 1))
+    echo -n "."
+done
+
+echo ""
+echo -e "${RED}✗ タイムアウト：信号を受信できませんでした${NC}"
+echo "もう一度お試しください"
+cleanup
+exit 1

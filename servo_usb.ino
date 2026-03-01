@@ -2,10 +2,12 @@
 // オルタネートスイッチで2つの角度を制御（経由地を通る移動）
 // 赤外線送受信機能でスマートリモコンと連携
 // IRremote 3.9.0対応
+// 赤外線学習機能対応
 
 #include <Servo.h>
 #include <IRremote.hpp>  // 赤外線送受信ライブラリ 3.9.0
 #include <Keyboard.h>    // HIDキーボード機能
+#include <EEPROM.h>      // EEPROMアクセス
 
 // ピン設定
 const int SERVO_PIN = 5;
@@ -66,45 +68,25 @@ struct TaskContext {
   unsigned long stepStartTime;
 };
 
-// 独自IRパターン定義（NEC形式を採用）
-// NEC形式の正しい実装（32ビット完全版）
-// ビット0 = 560,560  ビット1 = 560,1680
+// EEPROM設定
+const uint16_t MAX_PATTERN_LENGTH = 70;
+const char EEPROM_MAGIC[] = "IRL2";
+const int EEPROM_MAGIC_ADDR = 0;
+const int EEPROM_ON_LEN_ADDR = 4;
+const int EEPROM_ON_DATA_ADDR = 5;
+const int EEPROM_OFF_LEN_ADDR = 150;
+const int EEPROM_OFF_DATA_ADDR = 151;
 
-const uint16_t ON_PATTERN[] PROGMEM = {
-  9000, 4500,  // NECリーダー
-  // アドレス 0x00 (0000 0000)
-  560,560, 560,560, 560,560, 560,560,
-  560,560, 560,560, 560,560, 560,560,
-  // アドレス反転 0xFF (1111 1111)
-  560,1680, 560,1680, 560,1680, 560,1680,
-  560,1680, 560,1680, 560,1680, 560,1680,
-  // コマンド 0x01 (LSBファースト: 1,0,0,0,0,0,0,0)
-  560,1680, 560,560, 560,560, 560,560,
-  560,560, 560,560, 560,560, 560,560,
-  // コマンド反転 0xFE (LSBファースト: 0,1,1,1,1,1,1,1)
-  560,560, 560,1680, 560,1680, 560,1680,
-  560,1680, 560,1680, 560,1680, 560,1680,
-  560  // ストップビット
+// 学習モード
+enum LearnMode {
+  LEARN_NONE,
+  LEARN_ON,
+  LEARN_OFF
 };
-const int ON_PATTERN_LEN = sizeof(ON_PATTERN) / sizeof(ON_PATTERN[0]);
-
-const uint16_t OFF_PATTERN[] PROGMEM = {
-  9000, 4500,  // NECリーダー
-  // アドレス 0x00 (0000 0000)
-  560,560, 560,560, 560,560, 560,560,
-  560,560, 560,560, 560,560, 560,560,
-  // アドレス反転 0xFF (1111 1111)
-  560,1680, 560,1680, 560,1680, 560,1680,
-  560,1680, 560,1680, 560,1680, 560,1680,
-  // コマンド 0x02 (LSBファースト: 0,1,0,0,0,0,0,0)
-  560,560, 560,1680, 560,560, 560,560,
-  560,560, 560,560, 560,560, 560,560,
-  // コマンド反転 0xFD (LSBファースト: 1,0,1,1,1,1,1,1)
-  560,1680, 560,560, 560,1680, 560,1680,
-  560,1680, 560,1680, 560,1680, 560,1680,
-  560  // ストップビット
-};
-const int OFF_PATTERN_LEN = sizeof(OFF_PATTERN) / sizeof(OFF_PATTERN[0]);
+LearnMode learnMode = LEARN_NONE;
+uint16_t learnedPattern[70];
+uint8_t learnedPatternLength = 0;
+bool eepromValid = false;
 
 // グローバル変数
 Servo myServo;
@@ -222,6 +204,131 @@ void beepDouble() {
   startDoubleBeep();
 }
 
+// ========== EEPROM操作関数 ==========
+
+bool checkEEPROMValid() {
+  char magic[4];
+  for (int i = 0; i < 4; i++) {
+    magic[i] = EEPROM.read(EEPROM_MAGIC_ADDR + i);
+  }
+  return (magic[0] == 'I' && magic[1] == 'R' && magic[2] == 'L' && magic[3] == '2');
+}
+
+void writeMagicNumber() {
+  for (int i = 0; i < 4; i++) {
+    EEPROM.update(EEPROM_MAGIC_ADDR + i, EEPROM_MAGIC[i]);
+  }
+}
+
+void savePatternToEEPROM(bool isOnPattern, const uint16_t* pattern, uint8_t len) {
+  int lenAddr = isOnPattern ? EEPROM_ON_LEN_ADDR : EEPROM_OFF_LEN_ADDR;
+  int dataAddr = isOnPattern ? EEPROM_ON_DATA_ADDR : EEPROM_OFF_DATA_ADDR;
+
+  EEPROM.update(lenAddr, len);
+
+  for (int i = 0; i < len && i < MAX_PATTERN_LENGTH; i++) {
+    EEPROM.update(dataAddr + (i * 2), lowByte(pattern[i]));
+    EEPROM.update(dataAddr + (i * 2) + 1, highByte(pattern[i]));
+  }
+
+  writeMagicNumber();
+  eepromValid = true;
+
+  Serial.print("Saved ");
+  Serial.print(isOnPattern ? "ON" : "OFF");
+  Serial.print(" pattern to EEPROM (len=");
+  Serial.print(len);
+  Serial.println(")");
+}
+
+bool loadPatternFromEEPROM(bool isOnPattern, uint16_t* pattern, uint8_t* len) {
+  if (!eepromValid) return false;
+
+  int lenAddr = isOnPattern ? EEPROM_ON_LEN_ADDR : EEPROM_OFF_LEN_ADDR;
+  int dataAddr = isOnPattern ? EEPROM_ON_DATA_ADDR : EEPROM_OFF_DATA_ADDR;
+
+  *len = EEPROM.read(lenAddr);
+  if (*len == 0 || *len > MAX_PATTERN_LENGTH) return false;
+
+  for (int i = 0; i < *len; i++) {
+    pattern[i] = word(EEPROM.read(dataAddr + (i * 2) + 1), EEPROM.read(dataAddr + (i * 2)));
+  }
+
+  return true;
+}
+
+void resetEEPROMPatterns() {
+  EEPROM.update(EEPROM_MAGIC_ADDR, 0);
+  eepromValid = false;
+  Serial.println("EEPROM reset");
+}
+
+// ========== シリアルコマンド処理 ==========
+
+void handleSerialCommands() {
+  if (Serial.available() > 0) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd == "LEARN_ON") {
+      learnMode = LEARN_ON;
+      Serial.println("OK LEARN_ON");
+      startShortBeep();
+      Serial.println("Send ON signal...");
+
+    } else if (cmd == "LEARN_OFF") {
+      learnMode = LEARN_OFF;
+      Serial.println("OK LEARN_OFF");
+      startShortBeep();
+      Serial.println("Send OFF signal...");
+
+    } else if (cmd == "RESET_PATTERNS") {
+      resetEEPROMPatterns();
+      Serial.println("OK RESET");
+
+    } else if (cmd == "DUMP_PATTERNS") {
+      Serial.println("=== EEPROM DUMP ===");
+
+      uint8_t len;
+      uint16_t pattern[MAX_PATTERN_LENGTH];
+
+      // ONパターン
+      if (loadPatternFromEEPROM(true, pattern, &len)) {
+        Serial.print("ON Pattern (len=");
+        Serial.print(len);
+        Serial.println("):");
+        Serial.print("[");
+        for (int i = 0; i < len && i < 30; i++) {
+          Serial.print(pattern[i]);
+          if (i < len - 1 && i < 29) Serial.print(",");
+        }
+        if (len > 30) Serial.print("...");
+        Serial.println("]");
+      } else {
+        Serial.println("ON Pattern: NOT FOUND");
+      }
+
+      // OFFパターン
+      if (loadPatternFromEEPROM(false, pattern, &len)) {
+        Serial.print("OFF Pattern (len=");
+        Serial.print(len);
+        Serial.println("):");
+        Serial.print("[");
+        for (int i = 0; i < len && i < 30; i++) {
+          Serial.print(pattern[i]);
+          if (i < len - 1 && i < 29) Serial.print(",");
+        }
+        if (len > 30) Serial.print("...");
+        Serial.println("]");
+      } else {
+        Serial.println("OFF Pattern: NOT FOUND");
+      }
+
+      Serial.println("==================");
+    }
+  }
+}
+
 // Raw HIDキー送信関数（無効なキーコードを送信してディスプレイを起こす）
 void sendRawHIDKey(uint8_t hidKeycode) {
   Serial.print("HID key:0x");
@@ -245,39 +352,40 @@ void sendRawHIDKey(uint8_t hidKeycode) {
   Serial.println("HID sent");
 }
 
-// 赤外線信号送信（3.9.0対応）
+// 赤外線信号送信（3.9.0対応、EEPROMのみ）
 void sendIRSignal(int state) {
   Serial.print("IR sending:");
   Serial.print(state == 1 ? "ON" : "OFF");
-  Serial.print(" len:");
+
+  uint8_t patternLen;
 
   if (state == 1) {
-    for (int i = 0; i < ON_PATTERN_LEN; i++) {
-      sendBuf[i] = pgm_read_word(&ON_PATTERN[i]);
+    if (!loadPatternFromEEPROM(true, sendBuf, &patternLen)) {
+      Serial.println(" - ERROR: ON pattern not learned!");
+      return;
     }
-    Serial.print(ON_PATTERN_LEN);
-    Serial.print(" [");
-    for (int i = 0; i < ON_PATTERN_LEN && i < 67; i++) {
-      Serial.print(sendBuf[i]);
-      if (i < ON_PATTERN_LEN - 1 && i < 66) Serial.print(",");
+  } else {
+    if (!loadPatternFromEEPROM(false, sendBuf, &patternLen)) {
+      Serial.println(" - ERROR: OFF pattern not learned!");
+      return;
     }
-    Serial.println("]");
-    IrSender.sendRaw(sendBuf, ON_PATTERN_LEN, 38);
-    Serial.println("IR sent:ON");
-  } else if (state == 0) {
-    for (int i = 0; i < OFF_PATTERN_LEN; i++) {
-      sendBuf[i] = pgm_read_word(&OFF_PATTERN[i]);
-    }
-    Serial.print(OFF_PATTERN_LEN);
-    Serial.print(" [");
-    for (int i = 0; i < OFF_PATTERN_LEN && i < 67; i++) {
-      Serial.print(sendBuf[i]);
-      if (i < OFF_PATTERN_LEN - 1 && i < 66) Serial.print(",");
-    }
-    Serial.println("]");
-    IrSender.sendRaw(sendBuf, OFF_PATTERN_LEN, 38);
-    Serial.println("IR sent:OFF");
   }
+
+  Serial.print(" len:");
+  Serial.println(patternLen);
+
+  // パターンをダンプ（最初の20要素）
+  Serial.print("Sending pattern [");
+  for (int i = 0; i < patternLen && i < 20; i++) {
+    Serial.print(sendBuf[i]);
+    if (i < patternLen - 1 && i < 19) Serial.print(",");
+  }
+  if (patternLen > 20) Serial.print("...");
+  Serial.println("]");
+
+  IrSender.sendRaw(sendBuf, patternLen, 38);
+  Serial.print("IR sent:");
+  Serial.println(state == 1 ? "ON" : "OFF");
 }
 
 // スイッチからのシナリオ選択
@@ -300,8 +408,6 @@ int selectScenarioFromSwitch(int currentSwitchState, int lastDebouncedState) {
 
   return -1;
 }
-
-// checkIRPattern()関数は削除 - NECデコーダーを使用するため不要
 
 void moveServoTo(int angle) {
   if (currentAngle != angle) {
@@ -333,7 +439,7 @@ void activateScenario(int scenarioId) {
   sendIRSignal(logicalState);
 }
 
-// 赤外線受信処理（NECデコーダー使用）
+// 赤外線受信処理（NECデコーダー使用、学習モード対応）
 void handleIRReception() {
   if (millis() - lastIRReceiveTime < IR_COOLDOWN)
     return;
@@ -341,27 +447,91 @@ void handleIRReception() {
   if (IrReceiver.decode()) {
     lastIRReceiveTime = millis();
 
+    // デバッグ：受信情報をダンプ（通常モード時）
+    if (learnMode == LEARN_NONE) {
+      Serial.print("IR RX Protocol:");
+      Serial.print(IrReceiver.decodedIRData.protocol);
+      Serial.print(" Addr:0x");
+      Serial.print(IrReceiver.decodedIRData.address, HEX);
+      Serial.print(" Cmd:0x");
+      Serial.println(IrReceiver.decodedIRData.command, HEX);
+
+      // RAWパターンもダンプ
+      if (IrReceiver.decodedIRData.rawDataPtr != nullptr) {
+        uint16_t rawLen = IrReceiver.decodedIRData.rawDataPtr->rawlen;
+        Serial.print("Raw [");
+        for (uint16_t i = 1; i < rawLen && i < 21; i++) {
+          Serial.print(IrReceiver.decodedIRData.rawDataPtr->rawbuf[i]);
+          if (i < rawLen - 1 && i < 20) Serial.print(",");
+        }
+        if (rawLen > 21) Serial.print("...");
+        Serial.println("]");
+      }
+    }
+
+    // 学習モード中の処理
+    if (learnMode != LEARN_NONE) {
+      if (IrReceiver.decodedIRData.rawDataPtr != nullptr) {
+        uint16_t rawLen = IrReceiver.decodedIRData.rawDataPtr->rawlen;
+
+        Serial.print("Learn: rawLen=");
+        Serial.println(rawLen);
+
+        if (rawLen > 1 && rawLen <= MAX_PATTERN_LENGTH + 1) {
+          // パターンをコピー（rawbufの値を直接使用）
+          for (uint16_t i = 0; i < rawLen - 1; i++) {
+            learnedPattern[i] = IrReceiver.decodedIRData.rawDataPtr->rawbuf[i + 1];
+          }
+          learnedPatternLength = rawLen - 1;
+
+          // パターンをダンプ
+          Serial.print("Pattern [");
+          for (int i = 0; i < learnedPatternLength && i < 20; i++) {
+            Serial.print(learnedPattern[i]);
+            if (i < learnedPatternLength - 1 && i < 19) Serial.print(",");
+          }
+          if (learnedPatternLength > 20) Serial.print("...");
+          Serial.println("]");
+
+          // EEPROMに保存
+          savePatternToEEPROM(learnMode == LEARN_ON, learnedPattern, learnedPatternLength);
+
+          startDoubleBeep();
+          Serial.print("Learned ");
+          Serial.print(learnMode == LEARN_ON ? "ON" : "OFF");
+          Serial.print(" pattern (len=");
+          Serial.print(learnedPatternLength);
+          Serial.println(")");
+
+        } else {
+          Serial.println("Pattern length error");
+          startLongBeep();
+        }
+      } else {
+        Serial.println("No RAW data");
+        startLongBeep();
+      }
+
+      learnMode = LEARN_NONE;
+      IrReceiver.resume();
+      return;
+    }
+
+    // 通常モード中の処理
     // NECプロトコルとして解析できた場合
     if (IrReceiver.decodedIRData.protocol == NEC) {
       uint8_t address = IrReceiver.decodedIRData.address;
       uint8_t command = IrReceiver.decodedIRData.command;
 
-      Serial.print("IR rx NEC addr:0x");
-      Serial.print(address, HEX);
-      Serial.print(" cmd:0x");
-      Serial.println(command, HEX);
-
-      // address=0x00 でコマンドを判定
-      // 0x01 またはその反転 0x80 → ON
-      // 0x02 またはその反転 0xFD → OFF
-      if (address == 0x00) {
-        if (command == 0x01 || command == 0x80) {  // ONコマンド
-          Serial.println("-> ON");
-          beepLong();  // ON信号受信: ピーー
+      // スマートリモコン対応: address=0x82
+      if (address == 0x82) {
+        if (command == 0x26) {  // ONコマンド（スマートリモコン）
+          Serial.println("-> ON (smart remote)");
+          beepLong();
           activateScenario(1);
-        } else if (command == 0x02 || command == 0xFD) {  // OFFコマンド
-          Serial.println("-> OFF");
-          beepDouble();  // OFF信号受信: ピッピッ
+        } else if (command == 0x3E) {  // OFFコマンド（スマートリモコン）
+          Serial.println("-> OFF (smart remote)");
+          beepDouble();
           activateScenario(0);
         } else {
           Serial.print("-> UNKNOWN cmd:0x");
@@ -374,10 +544,7 @@ void handleIRReception() {
 
     } else {
       // NEC以外のプロトコルまたは解析失敗
-      Serial.print("IR rx protocol:");
-      Serial.print(IrReceiver.decodedIRData.protocol);
-      Serial.print(" len:");
-      Serial.println(IrReceiver.decodedIRData.rawDataPtr ? IrReceiver.decodedIRData.rawDataPtr->rawlen : 0);
+      Serial.println("-> Non-NEC protocol");
     }
 
     IrReceiver.resume();
@@ -441,6 +608,14 @@ void setup() {
   IrReceiver.begin(IR_RECV_PIN, ENABLE_LED_FEEDBACK);
   IrSender.begin(IR_LED_PIN, DISABLE_LED_FEEDBACK);
 
+  // EEPROMチェック
+  eepromValid = checkEEPROMValid();
+  if (eepromValid) {
+    Serial.println("EEPROM OK");
+  } else {
+    Serial.println("EEPROM empty");
+  }
+
   // USB通電検知時: ピッ
   beepShort();
 
@@ -474,23 +649,28 @@ void loop() {
   // ブザー状態更新（非ブロッキング）
   updateBuzzer();
 
-  // スイッチ処理
-  int switchState = digitalRead(SWITCH_PIN);
+  // シリアルコマンド処理
+  handleSerialCommands();
 
-  if (switchState != lastRawSwitchState) {
-    lastDebounceTime = millis();
-    lastRawSwitchState = switchState;
-  }
+  // スイッチ処理（学習モード中は無効化）
+  if (learnMode == LEARN_NONE) {
+    int switchState = digitalRead(SWITCH_PIN);
 
-  if (currentTask.scenario < 0 &&
-      (millis() - lastDebounceTime) >= DEBOUNCE_DELAY &&
-      switchState != lastDebouncedState) {
-
-    int scenarioId = selectScenarioFromSwitch(switchState, lastDebouncedState);
-    if (scenarioId >= 0) {
-      activateScenario(scenarioId);
+    if (switchState != lastRawSwitchState) {
+      lastDebounceTime = millis();
+      lastRawSwitchState = switchState;
     }
-    lastDebouncedState = switchState;
+
+    if (currentTask.scenario < 0 &&
+        (millis() - lastDebounceTime) >= DEBOUNCE_DELAY &&
+        switchState != lastDebouncedState) {
+
+      int scenarioId = selectScenarioFromSwitch(switchState, lastDebouncedState);
+      if (scenarioId >= 0) {
+        activateScenario(scenarioId);
+      }
+      lastDebouncedState = switchState;
+    }
   }
 
   executeTask();
