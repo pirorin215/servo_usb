@@ -5,6 +5,7 @@
 
 #include <Servo.h>
 #include <IRremote.hpp>  // 赤外線送受信ライブラリ 3.9.0
+#include <Keyboard.h>    // HIDキーボード機能
 
 // ピン設定
 const int SERVO_PIN = 5;
@@ -17,10 +18,53 @@ const int BUZZER_PIN = 6;     // ブザー
 const unsigned long DEBOUNCE_DELAY = 50;
 const unsigned long IR_COOLDOWN = 1000;  // チャタリング対策：1秒に変更
 
+// HIDキーコード定数（未定義の無効なキーコード）
+const uint8_t WAKE_KEYCODE = 0xA5;
+
+// キーボード初期化フラグ
+bool keyboard_initialized = false;
+
 // ブザー音の長さ定義
 const unsigned long BEEP_SHORT_DURATION = 100;
 const unsigned long BEEP_LONG_DURATION = 300;
 const unsigned long BEEP_GAP_DURATION = 100;
+
+// コマンドタイプ
+enum CommandType {
+  CMD_MOVE = 0,
+  CMD_WAIT = 1,
+  CMD_DETACH = 2,
+  CMD_END = 3,
+  CMD_KEY = 4
+};
+
+// コマンド構造体
+struct Command {
+  CommandType type;
+  int value;
+};
+
+const Command OFF_COMMANDS[] = {
+  {CMD_MOVE, 160}, {CMD_WAIT, 800}, {CMD_MOVE, 147}, {CMD_DETACH, 0}, {CMD_END, 0}
+};
+
+const Command ON_COMMANDS[] = {
+  {CMD_MOVE, 80}, {CMD_WAIT, 800}, {CMD_MOVE, 90}, {CMD_DETACH, 0}, {CMD_WAIT, 1000}, {CMD_KEY, WAKE_KEYCODE}, {CMD_END, 0}
+};
+
+struct ScenarioDef {
+  const Command* commands;
+};
+
+const ScenarioDef SCENARIOS[] = {
+  {OFF_COMMANDS}, {ON_COMMANDS}
+};
+
+struct TaskContext {
+  int scenario;
+  int currentStep;
+  unsigned long stepStartTime;
+};
 
 // 独自IRパターン定義（NEC形式を採用）
 // NEC形式の正しい実装（32ビット完全版）
@@ -61,42 +105,6 @@ const uint16_t OFF_PATTERN[] PROGMEM = {
   560  // ストップビット
 };
 const int OFF_PATTERN_LEN = sizeof(OFF_PATTERN) / sizeof(OFF_PATTERN[0]);
-
-// コマンドタイプ
-enum CommandType {
-  CMD_MOVE = 0,
-  CMD_WAIT = 1,
-  CMD_DETACH = 2,
-  CMD_END = 3
-};
-
-// コマンド構造体
-struct Command {
-  CommandType type;
-  int value;
-};
-
-const Command OFF_COMMANDS[] = {
-  {CMD_MOVE, 160}, {CMD_WAIT, 800}, {CMD_MOVE, 147}, {CMD_DETACH, 0}, {CMD_END, 0}
-};
-
-const Command ON_COMMANDS[] = {
-  {CMD_MOVE,  80}, {CMD_WAIT, 800}, {CMD_MOVE,  90}, {CMD_DETACH, 0}, {CMD_END, 0}
-};
-
-struct ScenarioDef {
-  const Command* commands;
-};
-
-const ScenarioDef SCENARIOS[] = {
-  {OFF_COMMANDS}, {ON_COMMANDS}
-};
-
-struct TaskContext {
-  int scenario;
-  int currentStep;
-  unsigned long stepStartTime;
-};
 
 // グローバル変数
 Servo myServo;
@@ -212,6 +220,29 @@ void beepLong() {
 
 void beepDouble() {
   startDoubleBeep();
+}
+
+// Raw HIDキー送信関数（無効なキーコードを送信してディスプレイを起こす）
+void sendRawHIDKey(uint8_t hidKeycode) {
+  Serial.print("HID key:0x");
+  Serial.println(hidKeycode, HEX);
+
+  // 初回使用時のみKeyboard.begin()を呼ぶ
+  if (!keyboard_initialized) {
+    Serial.println("Keyboard init");
+    Keyboard.begin();
+    delay(1000);
+    keyboard_initialized = true;
+  }
+
+  uint8_t buf[8] = {0};
+  buf[2] = hidKeycode;
+  HID().SendReport(2, buf, 8);
+  delay(50);
+  memset(buf, 0, 8);
+  HID().SendReport(2, buf, 8);
+
+  Serial.println("HID sent");
 }
 
 // 赤外線信号送信（3.9.0対応）
@@ -388,6 +419,12 @@ void executeTask() {
       Serial.println("Done");
       currentTask.scenario = -1;
       currentTask.currentStep = 0;
+      break;
+
+    case CMD_KEY:
+      sendRawHIDKey(cmd.value);
+      currentTask.currentStep++;
+      currentTask.stepStartTime = millis();
       break;
   }
 }
