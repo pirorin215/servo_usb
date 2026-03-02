@@ -43,3 +43,6 @@
 .DS_Store
 .cocoindex_code/
 .claude/
+
+# Environment configuration
+.env

@@ -14,8 +14,14 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # ========== 設定 ==========
-# ここに使用するシリアルポートを固定指定できます
-SERIAL_PORT="/dev/cu.usbmodemHIDEF1"
+# スクリプトの場所を取得して.envを読み込む
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    source "$SCRIPT_DIR/.env"
+fi
+
+# デフォルトのシリアルポート（.envまたはデフォルト値）
+SERIAL_PORT="${ARDUINO_PORT:-}"
 
 # ========== 引数処理 ==========
 MODE=""
@@ -32,7 +38,7 @@ if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     echo "  $0 reset                        # EEPROMをクリア"
     echo "  $0 on /dev/cu.usbmodem123456   # ポートを指定"
     echo ""
-    echo "シリアルポートを固定するには、スクリプト内の SERIAL_PORT 変数を編集してください"
+    echo "シリアルポートを固定するには、.envファイルの ARDUINO_PORT 変数を編集してください"
     exit 0
 fi
 
@@ -71,7 +77,7 @@ if [ -z "$SERIAL_PORT" ]; then
     echo -e "${RED}エラー: シリアルポートが見つかりません${NC}"
     echo ""
     echo "以下のいずれかの方法で指定してください:"
-    echo "  1. スクリプト内の SERIAL_PORT 変数を編集"
+    echo "  1. .envファイルの ARDUINO_PORT 変数を編集"
     echo "  2. 引数で指定: $0 $1 /dev/cu.usbmodemXXXXXX"
     echo ""
     echo "現在接続されているデバイス:"
