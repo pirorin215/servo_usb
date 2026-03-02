@@ -105,9 +105,9 @@ const int EEPROM_OFF_CMD_ADDR = 291;             // 291
 
 const int EEPROM_PLAYPAUSE_LEN_ADDR = 292;
 const int EEPROM_PLAYPAUSE_DATA_ADDR = 293;     // 293 〜 432 (RAW: 140バイト)
-const int EEPROM_PLAYPAUSE_PROTOCOL_ADDR = 437;  // 437
-const int EEPROM_PLAYPAUSE_ADDR_ADDR = 438;      // 438
-const int EEPROM_PLAYPAUSE_CMD_ADDR = 439;        // 439
+const int EEPROM_PLAYPAUSE_PROTOCOL_ADDR = 433;  // 433 (293 + 140)
+const int EEPROM_PLAYPAUSE_ADDR_ADDR = 434;      // 434
+const int EEPROM_PLAYPAUSE_CMD_ADDR = 435;        // 435
 
 // 学習モード
 enum LearnMode {
@@ -320,6 +320,14 @@ bool checkEEPROMValid() {
   for (int i = 0; i < 4; i++) {
     magic[i] = EEPROM.read(EEPROM_MAGIC_ADDR + i);
   }
+#if DEBUG_MODE
+  Serial.print(F("EEPROM Magic: ["));
+  Serial.print(magic[0]);
+  Serial.print(magic[1]);
+  Serial.print(magic[2]);
+  Serial.print(magic[3]);
+  Serial.println(F("]"));
+#endif
   // IRL3, IRL4, IRL5 のいずれかを受け入れる（下位互換性）
   return (magic[0] == 'I' && magic[1] == 'R' && magic[2] == 'L' &&
           (magic[3] == '3' || magic[3] == '4' || magic[3] == '5'));
@@ -377,6 +385,9 @@ bool loadPatternFromEEPROM(PatternType patternType, uint16_t* pattern, uint8_t* 
 
 PatternProtocolInfo loadProtocolInfo(PatternType patternType) {
   PatternProtocolInfo info = {false, 0, 0, 0};
+
+  if (!eepromValid) return info;  // EEPROMが無効な場合は空情報を返す
+
   EEPROMAddresses addrs = getEEPROMAddresses(patternType);
 
   info.protocol = EEPROM.read(addrs.protocolAddr);
