@@ -54,7 +54,9 @@ enum CommandType {
   CMD_DETACH = 2,
   CMD_END = 3,
   CMD_KEY = 4,        // Keyboardキー
-  CMD_CONSUMER = 5    // Consumerキー（Play/Pauseなど）
+  CMD_CONSUMER = 5,   // Consumerキー（Play/Pauseなど）
+  CMD_SEND_IR = 6,    // IR信号送信
+  CMD_SET_STATE = 7   // 論理状態設定
 };
 
 // コマンド構造体
@@ -64,19 +66,15 @@ struct Command {
 };
 
 const Command OFF_COMMANDS[] = {
-  {CMD_MOVE, 160}, {CMD_WAIT, 800}, {CMD_MOVE, 147}, {CMD_DETACH, 0}, {CMD_END, 0}
+  {CMD_MOVE, 160}, {CMD_WAIT, 800}, {CMD_MOVE, 147}, {CMD_SEND_IR, 0}, {CMD_SET_STATE, 0}, {CMD_DETACH, 0}, {CMD_END, 0}
 };
 
 const Command ON_COMMANDS[] = {
-  {CMD_MOVE, 80}, {CMD_WAIT, 800}, {CMD_MOVE, 90}, {CMD_DETACH, 0}, {CMD_WAIT, 1000}, {CMD_KEY, WAKE_KEYCODE}, {CMD_END, 0}
+  {CMD_MOVE, 80}, {CMD_WAIT, 800}, {CMD_MOVE, 90}, {CMD_SEND_IR, 1}, {CMD_SET_STATE, 1}, {CMD_DETACH, 0}, {CMD_WAIT, 1000}, {CMD_KEY, WAKE_KEYCODE}, {CMD_END, 0}
 };
 
-struct ScenarioDef {
-  const Command* commands;
-};
-
-const ScenarioDef SCENARIOS[] = {
-  {OFF_COMMANDS}, {ON_COMMANDS}
+const Command PLAYPAUSE_COMMANDS[] = {
+  {CMD_CONSUMER, PLAYPAUSE_KEYCODE}, {CMD_END, 0}
 };
 
 struct TaskContext {
@@ -180,6 +178,30 @@ enum BuzzerPhase {
   BUZZER_BEEP2_ON
 };
 
+// ビープ音種別
+enum BuzzerType {
+  BEEP_SHORT,
+  BEEP_LONG,
+  BEEP_DOUBLE
+};
+
+// シナリオ定義構造体
+struct ScenarioDef {
+  const Command* commands;
+  PatternType patternType;     // 対応するIRパターン
+  const char* name;            // シナリオ名
+  BuzzerType buzzerType;       // ビープ音種別
+  int scenarioId;              // シナリオID
+};
+
+const ScenarioDef SCENARIOS[] = {
+  {OFF_COMMANDS, PATTERN_OFF, "OFF", BEEP_DOUBLE, 0},
+  {ON_COMMANDS, PATTERN_ON, "ON", BEEP_LONG, 1},
+  {PLAYPAUSE_COMMANDS, PATTERN_PLAYPAUSE, "PLAYPAUSE", BEEP_SHORT, 2}
+};
+
+const uint8_t SCENARIO_COUNT = sizeof(SCENARIOS) / sizeof(SCENARIOS[0]);
+
 struct BuzzerState {
   bool active;
   unsigned long phaseStartTime;
@@ -269,6 +291,21 @@ void beepLong() {
 
 void beepDouble() {
   startDoubleBeep();
+}
+
+// ビープ音種別から再生（データ駆動用）
+void playBuzzer(BuzzerType type) {
+  switch (type) {
+    case BEEP_SHORT:
+      startShortBeep();
+      break;
+    case BEEP_LONG:
+      startLongBeep();
+      break;
+    case BEEP_DOUBLE:
+      startDoubleBeep();
+      break;
+  }
 }
 
 // 配列表示ヘルパー関数（重複排除）
@@ -618,22 +655,27 @@ void sendIRSignal(int state) {
   IrSender.sendRaw(sendBuf, patternLen, 38);
 }
 
-// スイッチからのシナリオ選択
+// スイッチからのシナリオ選択（シナリオ定義から動的に取得）
 int selectScenarioFromSwitch(int currentSwitchState, int lastDebouncedState) {
+  int targetScenarioId = -1;
+
   if (logicalState < 0) {
-    if (lastDebouncedState == HIGH && currentSwitchState == LOW) return 0;
-    else if (lastDebouncedState == LOW && currentSwitchState == HIGH) return 1;
-    return -1;
+    // 初期状態：スイッチ状態に基づいてシナリオを選択
+    if (lastDebouncedState == HIGH && currentSwitchState == LOW) targetScenarioId = 0;  // OFF
+    else if (lastDebouncedState == LOW && currentSwitchState == HIGH) targetScenarioId = 1;  // ON
+  } else if (logicalState == 0) {
+    // 現在OFF：LOW→HIGHでONへ
+    if (lastDebouncedState == LOW && currentSwitchState == HIGH) targetScenarioId = 1;
+  } else if (logicalState == 1) {
+    // 現在ON：HIGH→LOWでOFFへ
+    if (lastDebouncedState == HIGH && currentSwitchState == LOW) targetScenarioId = 0;
   }
 
-  if (logicalState == 0) {
-    if (lastDebouncedState == LOW && currentSwitchState == HIGH) return 1;
-    return -1;
-  }
-
-  if (logicalState == 1) {
-    if (lastDebouncedState == HIGH && currentSwitchState == LOW) return 0;
-    return -1;
+  // シナリオ定義からシナリオIDを取得
+  for (uint8_t i = 0; i < SCENARIO_COUNT; i++) {
+    if (SCENARIOS[i].scenarioId == targetScenarioId) {
+      return SCENARIOS[i].scenarioId;
+    }
   }
 
   return -1;
@@ -656,17 +698,6 @@ void activateScenario(int scenarioId) {
   currentTask.scenario = scenarioId;
   currentTask.currentStep = 0;
   currentTask.stepStartTime = millis();
-
-  if (scenarioId == 0) {
-    logicalState = 0;
-  } else if (scenarioId == 1) {
-    logicalState = 1;
-  }
-
-  Serial.print(F("Act:"));
-  Serial.println(logicalState);
-
-  sendIRSignal(logicalState);
 }
 
 // 赤外線受信処理（RAW波形照合方式）
@@ -846,42 +877,31 @@ void handleIRReception() {
 
   // Method A: プロトコル照合（高速・高精度）
   if (rxAddress != 0 && rxCommand != 0) {
-    PatternProtocolInfo onInfo = loadProtocolInfo(PATTERN_ON);
-    if (onInfo.isValid && rxAddress == onInfo.address && rxCommand == onInfo.command) {
-      Serial.println(F("-> ON"));
-      matched = true;
-      matchedPattern = PATTERN_ON;
-    } else {
-      PatternProtocolInfo offInfo = loadProtocolInfo(PATTERN_OFF);
-      if (offInfo.isValid && rxAddress == offInfo.address && rxCommand == offInfo.command) {
-        Serial.println(F("-> OFF"));
+    for (uint8_t i = 0; i < SCENARIO_COUNT; i++) {
+      const ScenarioDef& scenario = SCENARIOS[i];
+      PatternProtocolInfo info = loadProtocolInfo(scenario.patternType);
+      if (info.isValid && rxAddress == info.address && rxCommand == info.command) {
+        Serial.print(F("-> "));
+        Serial.println(scenario.name);
         matched = true;
-        matchedPattern = PATTERN_OFF;
-      } else {
-        PatternProtocolInfo ppInfo = loadProtocolInfo(PATTERN_PLAYPAUSE);
-        if (ppInfo.isValid && rxAddress == ppInfo.address && rxCommand == ppInfo.command) {
-          Serial.println(F("-> PLAYPAUSE"));
-          matched = true;
-          matchedPattern = PATTERN_PLAYPAUSE;
-        }
+        matchedPattern = scenario.patternType;
+        break;
       }
     }
   }
 
   // Method B: プロトコル照合失敗時のみRAW波形照合
   if (!matched) {
-    if (matchesStoredPattern(PATTERN_PLAYPAUSE, rxBuf, sigLen)) {
-      Serial.println(F("-> PLAYPAUSE (by RAW)"));
-      matched = true;
-      matchedPattern = PATTERN_PLAYPAUSE;
-    } else if (matchesStoredPattern(PATTERN_ON, rxBuf, sigLen)) {
-      Serial.println(F("-> ON (by RAW)"));
-      matched = true;
-      matchedPattern = PATTERN_ON;
-    } else if (matchesStoredPattern(PATTERN_OFF, rxBuf, sigLen)) {
-      Serial.println(F("-> OFF (by RAW)"));
-      matched = true;
-      matchedPattern = PATTERN_OFF;
+    for (uint8_t i = 0; i < SCENARIO_COUNT; i++) {
+      const ScenarioDef& scenario = SCENARIOS[i];
+      if (matchesStoredPattern(scenario.patternType, rxBuf, sigLen)) {
+        Serial.print(F("-> "));
+        Serial.print(scenario.name);
+        Serial.println(F(" (by RAW)"));
+        matched = true;
+        matchedPattern = scenario.patternType;
+        break;
+      }
     }
   }
 
@@ -894,21 +914,14 @@ void handleIRReception() {
     // バイナリ表現も表示
     printBinaryPattern(rxBuf, sigLen);
 
-    switch (matchedPattern) {
-      case PATTERN_ON:
-        beepLong();
-        activateScenario(1);
+    // シナリオ定義から対応するアクションを実行
+    for (uint8_t i = 0; i < SCENARIO_COUNT; i++) {
+      const ScenarioDef& scenario = SCENARIOS[i];
+      if (scenario.patternType == matchedPattern) {
+        playBuzzer(scenario.buzzerType);
+        activateScenario(scenario.scenarioId);
         break;
-      case PATTERN_OFF:
-        beepDouble();
-        activateScenario(0);
-        break;
-      case PATTERN_PLAYPAUSE:
-        beepShort();  // ピッ（短い音）
-        Serial.println(F("Act:PLAYPAUSE"));
-        sendConsumerKey(PLAYPAUSE_KEYCODE);
-        Serial.println(F("Done"));
-        break;
+      }
     }
   } else {
     Serial.println(F("-> UNKNOWN (no match)"));
@@ -965,6 +978,18 @@ void executeTask() {
       currentTask.currentStep++;
       currentTask.stepStartTime = millis();
       break;
+
+    case CMD_SEND_IR:
+      sendIRSignal(cmd.value);
+      currentTask.currentStep++;
+      currentTask.stepStartTime = millis();
+      break;
+
+    case CMD_SET_STATE:
+      logicalState = cmd.value;
+      currentTask.currentStep++;
+      currentTask.stepStartTime = millis();
+      break;
   }
 }
 
@@ -1000,8 +1025,22 @@ void setup() {
 
   // 初期スイッチ状態を読み取り、初期位置を設定
   int switchState = digitalRead(SWITCH_PIN);
+  // スイッチHIGH時はシナリオ1(ON)、LOW時はシナリオ0(OFF)
   int initialScenarioId = (switchState == HIGH) ? 1 : 0;
-  const Command* initialCommands = SCENARIOS[initialScenarioId].commands;
+
+  // シナリオ定義からシナリオIDを検索
+  const Command* initialCommands = nullptr;
+  for (uint8_t i = 0; i < SCENARIO_COUNT; i++) {
+    if (SCENARIOS[i].scenarioId == initialScenarioId) {
+      initialCommands = SCENARIOS[i].commands;
+      break;
+    }
+  }
+
+  if (initialCommands == nullptr) {
+    Serial.println(F("ERROR: Initial scenario not found"));
+    while (1);  // 停止
+  }
 
   for (int i = 0; initialCommands[i].type != CMD_END; i++) {
     if (initialCommands[i].type == CMD_MOVE)
