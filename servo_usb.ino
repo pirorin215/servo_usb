@@ -66,7 +66,7 @@ struct Command {
 };
 
 const Command OFF_COMMANDS[] = {
-  {CMD_MOVE, 160}, {CMD_WAIT, 800}, {CMD_MOVE, 147}, {CMD_SEND_IR, 0}, {CMD_SET_STATE, 0}, {CMD_DETACH, 0}, {CMD_END, 0}
+  {CMD_MOVE, 175}, {CMD_WAIT, 800}, {CMD_MOVE, 167}, {CMD_SEND_IR, 0}, {CMD_SET_STATE, 0}, {CMD_DETACH, 0}, {CMD_END, 0}
 };
 
 const Command ON_COMMANDS[] = {
