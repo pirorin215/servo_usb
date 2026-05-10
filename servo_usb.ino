@@ -10,6 +10,41 @@
 #include <HID-Project.h> // HID-Project: Keyboard + Consumer対応
 #include <EEPROM.h>      // EEPROMアクセス
 
+// コマンドタイプ
+enum CommandType {
+  CMD_MOVE = 0,
+  CMD_WAIT = 1,
+  CMD_DETACH = 2,
+  CMD_END = 3,
+  CMD_KEY = 4,        // Keyboardキー
+  CMD_CONSUMER = 5,   // Consumerキー（Play/Pauseなど）
+  CMD_SEND_IR = 6     // IR信号送信
+};
+
+// コマンド構造体
+struct Command {
+  CommandType type;
+  uint16_t value;  // HIDキーコード（Keyboard: 8bit, Consumer: 16bit）
+};
+
+// HIDキーコード定数（コマンド配列の前に定義）
+const uint8_t WAKE_KEYCODE = 0xA5;           // Keyboard: 未定義キーでディスプレイウェイク
+const uint16_t PLAYPAUSE_KEYCODE = MEDIA_PLAY_PAUSE;  // Consumer: Play/Pause (HID-Project定義済み)
+
+// 操作シナリオ
+const Command OFF_COMMANDS[] = {
+  {CMD_MOVE, 80}, {CMD_WAIT, 800}, {CMD_MOVE, 90}, {CMD_SEND_IR, 0}, {CMD_DETACH, 0}, {CMD_END, 0}
+};
+
+const Command ON_COMMANDS[] = {
+  {CMD_MOVE, 175}, {CMD_WAIT, 800}, {CMD_MOVE, 167}, {CMD_SEND_IR, 1}, {CMD_DETACH, 0}, {CMD_WAIT, 1000}, {CMD_KEY, WAKE_KEYCODE}, {CMD_END, 0}
+};
+
+const Command PLAYPAUSE_COMMANDS[] = {
+  {CMD_CONSUMER, PLAYPAUSE_KEYCODE}, {CMD_END, 0}
+};
+
+
 // ピン設定
 const int SERVO_PIN = 5;
 const int SWITCH_PIN = 4;
@@ -20,10 +55,6 @@ const int BUZZER_PIN = 6;     // ブザー
 // 定義値
 const unsigned long DEBOUNCE_DELAY = 50;
 const unsigned long IR_COOLDOWN = 1000;  // チャタリング対策：1秒に変更
-
-// HIDキーコード定数（HID-Project形式）
-const uint8_t WAKE_KEYCODE = 0xA5;           // Keyboard: 未定義キーでディスプレイウェイク
-const uint16_t PLAYPAUSE_KEYCODE = MEDIA_PLAY_PAUSE;  // Consumer: Play/Pause (HID-Project定義済み)
 
 // RAW照合パラメータ
 const uint16_t MATCH_TOLERANCE_US = 200;   // 絶対誤差[μs]
@@ -46,36 +77,6 @@ bool keyboard_initialized = false;
 const unsigned long BEEP_SHORT_DURATION = 100;
 const unsigned long BEEP_LONG_DURATION = 300;
 const unsigned long BEEP_GAP_DURATION = 100;
-
-// コマンドタイプ
-enum CommandType {
-  CMD_MOVE = 0,
-  CMD_WAIT = 1,
-  CMD_DETACH = 2,
-  CMD_END = 3,
-  CMD_KEY = 4,        // Keyboardキー
-  CMD_CONSUMER = 5,   // Consumerキー（Play/Pauseなど）
-  CMD_SEND_IR = 6,    // IR信号送信
-  CMD_SET_STATE = 7   // 論理状態設定
-};
-
-// コマンド構造体
-struct Command {
-  CommandType type;
-  uint16_t value;  // HIDキーコード（Keyboard: 8bit, Consumer: 16bit）
-};
-
-const Command OFF_COMMANDS[] = {
-  {CMD_MOVE, 175}, {CMD_WAIT, 800}, {CMD_MOVE, 167}, {CMD_SEND_IR, 0}, {CMD_SET_STATE, 0}, {CMD_DETACH, 0}, {CMD_END, 0}
-};
-
-const Command ON_COMMANDS[] = {
-  {CMD_MOVE, 80}, {CMD_WAIT, 800}, {CMD_MOVE, 90}, {CMD_SEND_IR, 1}, {CMD_SET_STATE, 1}, {CMD_DETACH, 0}, {CMD_WAIT, 1000}, {CMD_KEY, WAKE_KEYCODE}, {CMD_END, 0}
-};
-
-const Command PLAYPAUSE_COMMANDS[] = {
-  {CMD_CONSUMER, PLAYPAUSE_KEYCODE}, {CMD_END, 0}
-};
 
 struct TaskContext {
   int scenario;
@@ -698,6 +699,11 @@ void activateScenario(int scenarioId) {
   currentTask.scenario = scenarioId;
   currentTask.currentStep = 0;
   currentTask.stepStartTime = millis();
+
+  // 論理状態を自動設定（OFFシナリオ→0、ONシナリオ→1）
+  if (scenarioId == 0) logicalState = 0;
+  else if (scenarioId == 1) logicalState = 1;
+  // PLAYPAUSE (scenarioId==2) は論理状態を変更しない
 }
 
 // 赤外線受信処理（RAW波形照合方式）
@@ -981,12 +987,6 @@ void executeTask() {
 
     case CMD_SEND_IR:
       sendIRSignal(cmd.value);
-      currentTask.currentStep++;
-      currentTask.stepStartTime = millis();
-      break;
-
-    case CMD_SET_STATE:
-      logicalState = cmd.value;
       currentTask.currentStep++;
       currentTask.stepStartTime = millis();
       break;
