@@ -10,6 +10,14 @@
 #include <HID-Project.h> // HID-Project: Keyboard + Consumer対応
 #include <EEPROM.h>      // EEPROMアクセス
 
+// IRremote バージョンガード
+// このスケッチは IRremote 3.x 系の API（rawDataPtr 等）に依存している。
+// v4.x は API 非互換のためビルドできない。Library Manager で誤って更新された場合、
+// ここで即座に検知してビルドを停止する。README.md の指定（3.9.0）参照。
+#if !defined(VERSION_IRREMOTE_MAJOR) || VERSION_IRREMOTE_MAJOR != 3
+#error "IRremote は 3.x 系（推奨 3.9.0）が必要です。v4.x は API 非互換です。Library Manager で IRremote 3.9.0 をインストールしてください。"
+#endif
+
 // コマンドタイプ
 enum CommandType {
   CMD_MOVE = 0,
