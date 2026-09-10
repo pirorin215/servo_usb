@@ -97,6 +97,14 @@ arduino-cli lib install HID-Project
 6. 検証ボタン(✓)をクリック
 7. アップロードボタン(→)をクリック
 
+
+## シリアルポート
+
+- 固定ポート: **`/dev/cu.usbmodemHIDEF1`**（`upload.sh` / `monitor.sh` は `.env` の `ARDUINO_PORT` を使用）
+- この基板は**常用固定デバイス**のため、他の実験・テスト目的での書き込みは禁止
+  （`~/dev/Arduino/AGENTS.md` §8 のシリアルポート対応表を参照）
+- シリアル通信は **9600 baud**（HIDEF1 は他のボーレートでは無音）
+
 ## 使い方
 
 ### 初期設定（必須）
