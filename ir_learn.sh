@@ -3,6 +3,8 @@
 # ir_learn.sh - Arduino 赤外線学習シェルスクリプト
 # 使い方: ./ir_learn.sh on              (ON信号を学習)
 #         ./ir_learn.sh off             (OFF信号を学習)
+#         ./ir_learn.sh light_on        (照明ON信号を学習)
+#         ./ir_learn.sh light_off       (照明OFF信号を学習)
 #         ./ir_learn.sh on /dev/cu.xxx  (シリアルポートを指定)
 
 set -e
@@ -28,12 +30,14 @@ MODE=""
 PORT_SPECIFIED=""
 
 if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-    echo "使い方: $0 <on|off|playpause|dump|reset> [シリアルポート]"
+    echo "使い方: $0 <on|off|playpause|light_on|light_off|dump|reset> [シリアルポート]"
     echo ""
     echo "例:"
     echo "  $0 on                           # ON信号を学習（自動検出）"
     echo "  $0 off                          # OFF信号を学習（自動検出）"
     echo "  $0 playpause                    # PLAYPAUSE信号を学習（自動検出）"
+    echo "  $0 light_on                     # 照明ON信号を学習（送信専用スロット）"
+    echo "  $0 light_off                    # 照明OFF信号を学習（送信専用スロット）"
     echo "  $0 dump                         # EEPROM内容をダンプ"
     echo "  $0 reset                        # EEPROMをクリア"
     echo "  $0 on /dev/cu.usbmodem123456   # ポートを指定"
@@ -46,12 +50,12 @@ MODE=$(echo "$1" | tr '[:upper:]' '[:lower:]')
 
 # モードの妥当性チェック（case文で重複排除）
 case "$MODE" in
-    on|off|playpause|dump|reset)
+    on|off|playpause|light_on|light_off|dump|reset)
         # 有効なモード
         ;;
     *)
-        echo -e "${RED}エラー: 'on', 'off', 'playpause', 'dump', または 'reset' を指定してください${NC}"
-        echo "使い方: $0 <on|off|playpause|dump|reset> [シリアルポート]"
+        echo -e "${RED}エラー: 'on', 'off', 'playpause', 'light_on', 'light_off', 'dump', または 'reset' を指定してください${NC}"
+        echo "使い方: $0 <on|off|playpause|light_on|light_off|dump|reset> [シリアルポート]"
         exit 1
         ;;
 esac
@@ -199,6 +203,12 @@ elif [ "$MODE" = "off" ]; then
 elif [ "$MODE" = "playpause" ]; then
     COMMAND="LEARN_PLAYPAUSE"
     SIGNAL_NAME="PLAYPAUSE信号"
+elif [ "$MODE" = "light_on" ]; then
+    COMMAND="LEARN_LIGHT_ON"
+    SIGNAL_NAME="照明ON信号"
+elif [ "$MODE" = "light_off" ]; then
+    COMMAND="LEARN_LIGHT_OFF"
+    SIGNAL_NAME="照明OFF信号"
 fi
 
 echo ""
@@ -222,10 +232,11 @@ echo ""
 echo "待機中..."
 
 # 学習完了を待つ（TMPLOGを監視、Learnedが出たら即終了）
-WAIT_COUNT=0
-MAX_WAIT=15  # 最大15秒
+# 待機秒数は環境変数 IR_LEARN_WAIT で延長可（例: IR_LEARN_WAIT=90 ./ir_learn.sh on）
+MAX_WAIT="${IR_LEARN_WAIT:-60}"
+DEADLINE=$(( $(date +%s) + MAX_WAIT ))
 
-while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     if grep -q "Learned" "$TMPLOG" 2>/dev/null; then
         echo ""
         echo -e "${GREEN}✓ 学習成功！${NC}"
@@ -234,21 +245,16 @@ while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
         exit 0
     fi
 
-    if grep -q "Pattern length error\|No RAW data" "$TMPLOG" 2>/dev/null; then
-        echo ""
-        echo -e "${RED}✗ 学習失敗${NC}"
-        echo "もう一度お試しください"
-        sleep 0.3
-        cleanup
-        exit 1
+    if grep -q "Pattern length error" "$TMPLOG" 2>/dev/null; then
+        echo -e "${YELLOW}（ノイズ検出 — 学習モード継続中。リモコンのボタンを押してください）${NC}"
+        > "$TMPLOG"  # 検出済みエラーをクリア（次の受信判定に備える）
     fi
 
     sleep 0.3
-    WAIT_COUNT=$((WAIT_COUNT + 1))
 done
 
 echo ""
-echo -e "${RED}✗ タイムアウト：信号を受信できませんでした${NC}"
+echo -e "${RED}✗ タイムアウト（${MAX_WAIT}秒）: 信号を受信できませんでした${NC}"
 echo "もう一度お試しください"
 cleanup
 exit 1

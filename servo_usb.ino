@@ -95,7 +95,7 @@ struct TaskContext {
 // EEPROM設定
 const uint16_t MAX_PATTERN_LENGTH = 70;
 const uint8_t EEPROM_RAW_DATA_SIZE = MAX_PATTERN_LENGTH * 2;  // uint16_t × 70 = 140バイト
-const char EEPROM_MAGIC[] = "IRL5";  // バージョンアップ（プロトコル情報追加）
+const char EEPROM_MAGIC[] = "IRL6";  // バージョンアップ（照明スロット追加）
 const int EEPROM_MAGIC_ADDR = 0;
 
 // EEPROMアドレス計算用マクロ（マジックナンバー削減）
@@ -124,12 +124,28 @@ const int EEPROM_PLAYPAUSE_PROTOCOL_ADDR = CALC_PROTOCOL_ADDR(EEPROM_PLAYPAUSE_D
 const int EEPROM_PLAYPAUSE_ADDR_ADDR = CALC_ADDR_ADDR(EEPROM_PLAYPAUSE_PROTOCOL_ADDR);
 const int EEPROM_PLAYPAUSE_CMD_ADDR = CALC_CMD_ADDR(EEPROM_PLAYPAUSE_ADDR_ADDR);
 
+// 照明用スロット（送信専用・受信マッチングには使わない）。既存3スロットの直後に追加。
+// 1ブロック144バイトでLIGHT_OFF終端=724バイト目、ATmega32U4のEEPROM 1024バイトに収まる。
+const int EEPROM_LIGHT_ON_LEN_ADDR = CALC_NEXT_PATTERN_LEN_ADDR(EEPROM_PLAYPAUSE_CMD_ADDR);
+const int EEPROM_LIGHT_ON_DATA_ADDR = CALC_PATTERN_DATA_ADDR(EEPROM_LIGHT_ON_LEN_ADDR);
+const int EEPROM_LIGHT_ON_PROTOCOL_ADDR = CALC_PROTOCOL_ADDR(EEPROM_LIGHT_ON_DATA_ADDR);
+const int EEPROM_LIGHT_ON_ADDR_ADDR = CALC_ADDR_ADDR(EEPROM_LIGHT_ON_PROTOCOL_ADDR);
+const int EEPROM_LIGHT_ON_CMD_ADDR = CALC_CMD_ADDR(EEPROM_LIGHT_ON_ADDR_ADDR);
+
+const int EEPROM_LIGHT_OFF_LEN_ADDR = CALC_NEXT_PATTERN_LEN_ADDR(EEPROM_LIGHT_ON_CMD_ADDR);
+const int EEPROM_LIGHT_OFF_DATA_ADDR = CALC_PATTERN_DATA_ADDR(EEPROM_LIGHT_OFF_LEN_ADDR);
+const int EEPROM_LIGHT_OFF_PROTOCOL_ADDR = CALC_PROTOCOL_ADDR(EEPROM_LIGHT_OFF_DATA_ADDR);
+const int EEPROM_LIGHT_OFF_ADDR_ADDR = CALC_ADDR_ADDR(EEPROM_LIGHT_OFF_PROTOCOL_ADDR);
+const int EEPROM_LIGHT_OFF_CMD_ADDR = CALC_CMD_ADDR(EEPROM_LIGHT_OFF_ADDR_ADDR);
+
 // 学習モード
 enum LearnMode {
   LEARN_NONE,
   LEARN_ON,
   LEARN_OFF,
-  LEARN_PLAYPAUSE
+  LEARN_PLAYPAUSE,
+  LEARN_LIGHT_ON,
+  LEARN_LIGHT_OFF
 };
 LearnMode learnMode = LEARN_NONE;
 
@@ -137,7 +153,9 @@ LearnMode learnMode = LEARN_NONE;
 enum PatternType {
   PATTERN_ON,
   PATTERN_OFF,
-  PATTERN_PLAYPAUSE
+  PATTERN_PLAYPAUSE,
+  PATTERN_LIGHT_ON,    // 照明ON（送信専用）
+  PATTERN_LIGHT_OFF    // 照明OFF（送信専用）
 };
 
 // 学習したプロトコル情報
@@ -365,6 +383,22 @@ EEPROMAddresses getEEPROMAddresses(PatternType patternType) {
       addrs.cmdAddr = EEPROM_PLAYPAUSE_CMD_ADDR;
       addrs.name = "PLAYPAUSE";
       break;
+    case PATTERN_LIGHT_ON:
+      addrs.lenAddr = EEPROM_LIGHT_ON_LEN_ADDR;
+      addrs.dataAddr = EEPROM_LIGHT_ON_DATA_ADDR;
+      addrs.protocolAddr = EEPROM_LIGHT_ON_PROTOCOL_ADDR;
+      addrs.addrAddr = EEPROM_LIGHT_ON_ADDR_ADDR;
+      addrs.cmdAddr = EEPROM_LIGHT_ON_CMD_ADDR;
+      addrs.name = "LIGHT_ON";
+      break;
+    case PATTERN_LIGHT_OFF:
+      addrs.lenAddr = EEPROM_LIGHT_OFF_LEN_ADDR;
+      addrs.dataAddr = EEPROM_LIGHT_OFF_DATA_ADDR;
+      addrs.protocolAddr = EEPROM_LIGHT_OFF_PROTOCOL_ADDR;
+      addrs.addrAddr = EEPROM_LIGHT_OFF_ADDR_ADDR;
+      addrs.cmdAddr = EEPROM_LIGHT_OFF_CMD_ADDR;
+      addrs.name = "LIGHT_OFF";
+      break;
   }
   return addrs;
 }
@@ -382,9 +416,9 @@ bool checkEEPROMValid() {
   Serial.print(magic[3]);
   Serial.println(F("]"));
 #endif
-  // IRL3, IRL4, IRL5 のいずれかを受け入れる（下位互換性）
+  // IRL3, IRL4, IRL5, IRL6 のいずれかを受け入れる（下位互換性）
   return (magic[0] == 'I' && magic[1] == 'R' && magic[2] == 'L' &&
-          (magic[3] == '3' || magic[3] == '4' || magic[3] == '5'));
+          (magic[3] == '3' || magic[3] == '4' || magic[3] == '5' || magic[3] == '6'));
 }
 
 void writeMagicNumber() {
@@ -521,6 +555,30 @@ void handleSerialCommands() {
       startShortBeep();
       Serial.println(F("Send PLAYPAUSE signal..."));
 
+    } else if (cmd == "LEARN_LIGHT_ON") {
+      learnMode = LEARN_LIGHT_ON;
+      Serial.println(F("OK LEARN_LIGHT_ON"));
+      startShortBeep();
+      Serial.println(F("Send LIGHT ON signal..."));
+
+    } else if (cmd == "LEARN_LIGHT_OFF") {
+      learnMode = LEARN_LIGHT_OFF;
+      Serial.println(F("OK LEARN_LIGHT_OFF"));
+      startShortBeep();
+      Serial.println(F("Send LIGHT OFF signal..."));
+
+    } else if (cmd == "SEND_LIGHT_ON") {
+      Serial.println(F("OK SEND_LIGHT_ON"));
+      if (sendIRPattern(PATTERN_LIGHT_ON)) {
+        Serial.println(F("IR sent:LIGHT_ON"));
+      }
+
+    } else if (cmd == "SEND_LIGHT_OFF") {
+      Serial.println(F("OK SEND_LIGHT_OFF"));
+      if (sendIRPattern(PATTERN_LIGHT_OFF)) {
+        Serial.println(F("IR sent:LIGHT_OFF"));
+      }
+
     } else if (cmd == "RESET_PATTERNS") {
       resetEEPROMPatterns();
       Serial.println(F("OK RESET"));
@@ -531,6 +589,8 @@ void handleSerialCommands() {
       dumpPattern(PATTERN_ON);
       dumpPattern(PATTERN_OFF);
       dumpPattern(PATTERN_PLAYPAUSE);
+      dumpPattern(PATTERN_LIGHT_ON);
+      dumpPattern(PATTERN_LIGHT_OFF);
 
       Serial.println(F("=================="));
     }
@@ -651,17 +711,32 @@ void sendConsumerKey(uint16_t keycode) {
   Serial.println(F("HID Consumer sent"));
 }
 
-// 赤外線信号送信（3.9.0対応、EEPROMのみ）
-void sendIRSignal(int state) {
+// パターンタイプ指定でEEPROMの学習パターンをIR送信（照明スロット等・シナリオ経由せず単発送信）
+bool sendIRPattern(PatternType ptype) {
   uint8_t patternLen;
-  PatternType ptype = (state == 1) ? PATTERN_ON : PATTERN_OFF;
 
   if (!loadPatternFromEEPROM(ptype, sendBuf, &patternLen)) {
     Serial.println(F(" - ERROR: pattern not learned!"));
-    return;
+    return false;
   }
 
+  // EEPROM保存値は受信TICKS(50μs)単位。sendRaw(uint16_t版)はマイクロ秒単位を
+  // 期待するため変換してから送る（変換なしだと50倍速い信号になる）
+  for (uint8_t i = 0; i < patternLen; i++) {
+    sendBuf[i] = (uint16_t)sendBuf[i] * MICROS_PER_TICK;
+  }
+  // 自己送信を受信機に拾わせない（送信LEDの光が自受信機へ回り込み、
+  // CMD_SEND_IR→自己受信→シナリオ再発動の無限ループが起きるのを防止）
+  IrReceiver.stop();
   IrSender.sendRaw(sendBuf, patternLen, 38);
+  delay(10);          // 受信IC出力のテールが終わるのを待つ
+  IrReceiver.start(); // 受信再開（内蔵resume()で受信バッファもクリア）
+  return true;
+}
+
+// 赤外線信号送信（3.9.0対応、EEPROMのみ。シナリオのCMD_SEND_IRから呼ばれる）
+void sendIRSignal(int state) {
+  sendIRPattern((state == 1) ? PATTERN_ON : PATTERN_OFF);
 }
 
 // スイッチからのシナリオ選択（シナリオ定義から動的に取得）
@@ -796,8 +871,15 @@ void handleIRReception() {
         Serial.println(F(" (UNKNOWN)"));
       }
 
-      // NECプロトコル警告
+      // NECプロトコル警告（確定したフレームのみガード）
       if (rxProtocol != NEC) {
+        if (rxProtocol == UNKNOWN && sigLen < 30) {
+          // リピート信号・リーダー部のみ等の未成立フレーム: 受信不良として学習継続
+          // （完全なNECフレームはsigLen≈67。ボタンは短く1回押せばフルフレームが来る）
+          Serial.println(F("Incomplete frame (UNKNOWN) - keep waiting..."));
+          IrReceiver.resume();
+          return;
+        }
         Serial.println(F(""));
         Serial.println(F("=================================="));
         Serial.println(F("WARNING: This device is designed for NEC protocol only!"));
@@ -813,9 +895,11 @@ void handleIRReception() {
       }
 
       PatternType ptype;
-      if      (learnMode == LEARN_ON)        ptype = PATTERN_ON;
-      else if (learnMode == LEARN_OFF)       ptype = PATTERN_OFF;
-      else                                   ptype = PATTERN_PLAYPAUSE;
+      if      (learnMode == LEARN_ON)          ptype = PATTERN_ON;
+      else if (learnMode == LEARN_OFF)         ptype = PATTERN_OFF;
+      else if (learnMode == LEARN_LIGHT_ON)    ptype = PATTERN_LIGHT_ON;
+      else if (learnMode == LEARN_LIGHT_OFF)   ptype = PATTERN_LIGHT_OFF;
+      else                                     ptype = PATTERN_PLAYPAUSE;
 
       EEPROMAddresses addrs = getEEPROMAddresses(ptype);
 
@@ -835,6 +919,9 @@ void handleIRReception() {
       Serial.print(MAX_PATTERN_LENGTH);
       Serial.println(F(")"));
       startLongBeep();
+      // ノイズ相当の短信号: 学習モードを継続し次の受信を待つ
+      IrReceiver.resume();
+      return;
     }
 
     learnMode = LEARN_NONE;
@@ -1022,6 +1109,15 @@ void setup() {
   eepromValid = checkEEPROMValid();
   if (eepromValid) {
     Serial.println(F("EEPROM OK"));
+
+    // IRL5以前→IRL6移行: 照明スロット領域は旧ファームでは未使用領域のため、
+    // staleデータの誤送信防止でlen=0に初期化する（既存3スロットはそのまま保持）
+    if (EEPROM.read(EEPROM_MAGIC_ADDR + 3) != '6') {
+      EEPROM.update(EEPROM_LIGHT_ON_LEN_ADDR, 0);
+      EEPROM.update(EEPROM_LIGHT_OFF_LEN_ADDR, 0);
+      writeMagicNumber();
+      Serial.println(F("Light slots initialized (IRL6)"));
+    }
   } else {
     Serial.println(F("EEPROM empty"));
   }
