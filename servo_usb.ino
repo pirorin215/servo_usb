@@ -579,6 +579,16 @@ void handleSerialCommands() {
         Serial.println(F("IR sent:LIGHT_OFF"));
       }
 
+    } else if (cmd == "SEND_ON") {
+      // ディスプレイONマクロ（IR受信のONと同じ経路: サーボ+ウェイクキー）
+      Serial.println(F("OK SEND_ON"));
+      activateScenario(1);
+
+    } else if (cmd == "SEND_OFF") {
+      // ディスプレイOFFマクロ（IR受信のOFFと同じ経路）
+      Serial.println(F("OK SEND_OFF"));
+      activateScenario(0);
+
     } else if (cmd == "RESET_PATTERNS") {
       resetEEPROMPatterns();
       Serial.println(F("OK RESET"));
