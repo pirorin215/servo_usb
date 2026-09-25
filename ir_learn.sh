@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/opt/homebrew/bin/bash
 
 # ir_learn.sh - Arduino 赤外線学習シェルスクリプト
 # 使い方: ./ir_learn.sh on              (ON信号を学習)

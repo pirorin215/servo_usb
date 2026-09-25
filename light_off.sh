@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/opt/homebrew/bin/bash
 
 # light_off.sh - servo_usb (HIDEF1) へ照明OFFコマンドを送信
 # 使い方: ./light_off.sh   (または sh light_off.sh)

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/opt/homebrew/bin/bash
 
 # display_on.sh - servo_usb (HIDEF1) へディスプレイONコマンドを送信
 # (サーボでオルタネートスイッチをON位置へ + HIDウェイクキー)

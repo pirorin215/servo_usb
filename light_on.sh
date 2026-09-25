@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/opt/homebrew/bin/bash
 
 # light_on.sh - servo_usb (HIDEF1) へ照明ONコマンドを送信
 # 使い方: ./light_on.sh   (または sh light_on.sh)

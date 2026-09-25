@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/opt/homebrew/bin/bash
 
 # display_off.sh - servo_usb (HIDEF1) へディスプレイOFFコマンドを送信
 # (サーボでオルタネートスイッチをOFF位置へ)
