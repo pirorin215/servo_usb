@@ -102,7 +102,7 @@ arduino-cli lib install HID-Project
 
 - 固定ポート: **`/dev/cu.usbmodemHIDEF1`**（`upload.sh` / `monitor.sh` は `.env` の `ARDUINO_PORT` を使用）
 - この基板は**常用固定デバイス**のため、他の実験・テスト目的での書き込みは禁止
-  （実験・ファーム検証は開発共通ポート `/dev/cu.usbmodem212101` か別ボードで。
+  （実験・ファーム検証は別ボードで。常設開発ポートは 2026-10-18 USB再編で廃止。
   本プロジェクト自身の開発書込 `sh upload.sh` は可）
 - シリアル通信は **9600 baud**（HIDEF1 は他のボーレートでは無音）
 
