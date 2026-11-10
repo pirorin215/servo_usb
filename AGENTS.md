@@ -1,10 +1,17 @@
 # servo_usb プロジェクト - エージェントへの指示
 
-## シリアルポート・書込
+> **⚠️ 2026-11-09 移設済み — 本ディレクトリ（Mac 側）は保管のみ**
+> servo_usb 基板は Mac mini から acemagic へ物理移設された。acemagic 側は
+> `/dev/ttyACM1`（Leonardo 2341:8036・serial HIDEF）= udev 固定名 `/dev/servo_usb`
+> で運用中・**acemagic では書込禁止**扱い（ACEMAGIC_SETUP.md §1.2 登録済み）。
+> Mac にはデバイスがなく、下記の HIDEF1 前提手順は移設前の記録（履歴）。
+> 実行・書込が必要な場合は acemagic 側 `~/dev/Arduino/servo_usb/` で。
 
-- **固定ポート: `/dev/cu.usbmodemHIDEF1`** — 本プロジェクト専用・9600 baud 固定
-  （他のボーレートでは無音）
-- **本プロジェクトの開発書込はエージェントが実行してよい**（2026-09-10 ユーザー指示。
+## シリアルポート・書込（移設前の mac 手順・履歴）
+
+- **旧固定ポート: `/dev/cu.usbmodemHIDEF1`** — 本プロジェクト専用・9600 baud 固定
+  （他のボーレートでは無音・2026-11-09 移設で mac から消滅）
+- **mac 時代の開発書込ルール（履歴・acemagic 側では書込禁止のため適用外）**（2026-09-10 ユーザー指示。
   常設の専用固定ポートのため書込先の混乱がなく、失敗してもリトライで無害）:
   1. `bash compile.sh` が成功していること・`/dev/cu.usbmodemHIDEF1` が存在することを確認
   2. `sh upload.sh` を実行する

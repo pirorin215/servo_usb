@@ -4,9 +4,12 @@
 Tasker + Apache配信エンドポイント方式に置き換えた最小構成。
 (同日夜の一時実装 light_server.py スタンドアロンサーバ 8879 は廃止済み)
 
-> **2026-11-09 現状**: Mac 側（Apache + light-ir エンドポイント）は稼働中・servo_usb は
-> 継続維持に決定（IR 実送信で照明 ON/OFF 再確認済み）。スマホ Tasker からの呼び出しは
-> 2026-09-13 を最後に停止中 — 再開時は下記の手順でスマホ側を再設定する。
+> **2026-11-09 停止**: servo_usb 基板は Mac mini から acemagic へ物理移設された
+> （acemagic 側 `/dev/servo_usb` で継続運用）。Mac Apache の light-ir エンドポイントは
+> 同日無効化（`~/www/light-ir/` → `~/www/light-ir.disabled-20261109` にリネーム済み）。
+> スマホ Tasker からの呼び出しは 2026-09-13 を最後に元々停止中 — 将来再開する場合は
+> Mac 側ではなくデバイス置き場（acemagic）でエンドポイントを再構築し、下記手順の
+> Mac 部分を読み替えてスマホ側を再設定する。
 
 ```
 スマホ Tasker ──(Wi-Fi接続/切断を検知)──▶ HTTP Request

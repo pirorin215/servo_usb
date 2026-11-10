@@ -1,7 +1,10 @@
 #!/opt/homebrew/bin/bash
 
-# light_off.sh - servo_usb (HIDEF1) へ照明OFFコマンドを送信
+# light_off.sh - servo_usb へ照明OFFコマンドを送信
 # 使い方: ./light_off.sh   (または sh light_off.sh)
+# ※2026-11-09 移設済み: servo_usb は acemagic(/dev/servo_usb)へ移設・実行正本は
+#   acemagic 側 ~/dev/Arduino/servo_usb/。下記の HIDEF1 デフォルトは移設前の
+#   mac ポート（歴史値・ARDUINO_PORT で上書き可）
 
 # スクリプトの場所を取得して.envを読み込む
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

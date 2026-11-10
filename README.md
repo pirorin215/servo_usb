@@ -100,10 +100,14 @@ arduino-cli lib install HID-Project
 
 ## シリアルポート
 
-- 固定ポート: **`/dev/cu.usbmodemHIDEF1`**（`upload.sh` / `monitor.sh` は `.env` の `ARDUINO_PORT` を使用）
+> **2026-11-09 移設**: 本基板は Mac mini から acemagic へ物理移設された。
+> acemagic 側は `/dev/ttyACM1` = udev 固定名 **`/dev/servo_usb`** で運用（書込禁止扱い）。
+> 以下は移設前の mac 前提の記述（履歴）。
+
+- 旧固定ポート（mac）: **`/dev/cu.usbmodemHIDEF1`**（`upload.sh` / `monitor.sh` は `.env` の `ARDUINO_PORT` を使用）
 - この基板は**常用固定デバイス**のため、他の実験・テスト目的での書き込みは禁止
   （実験・ファーム検証は別ボードで。常設開発ポートは 2026-10-18 USB再編で廃止。
-  本プロジェクト自身の開発書込 `sh upload.sh` は可）
+  本プロジェクト自身の開発書込 `sh upload.sh` は可 — mac 時代のルール）
 - シリアル通信は **9600 baud**（HIDEF1 は他のボーレートでは無音）
 
 ## 使い方
